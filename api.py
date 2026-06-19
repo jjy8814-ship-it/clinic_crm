@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from db import DB, Account, Activity, Deal, Expense, Order, ACTIVITY_TYPES, STAGES, TIERS
+from db import DB, Account, Activity, Deal, Expense, Order, ACTIVITY_TYPES, ACTIVE_STAGES, STAGES, TIERS
 
 ORDER_STATUSES = ["발주완료", "납품완료", "취소"]
 
@@ -100,34 +100,51 @@ def rename_stage(body: StageRenameIn):
 
 @app.get("/api/dashboard")
 def dashboard():
-    today = date.today().isoformat()
-    actions = _db.get_today_actions()
-    active = _db.get_deals()
-    recent_acts = _db.get_activities(limit=8)
+    this_month = date.today().isoformat()[:7]
 
-    enriched_actions = []
-    for d in actions:
-        acct = _db.get_account(d.account_id) if d.account_id else None
-        row = dataclasses.asdict(d)
-        row["account_name"] = acct.name if acct else None
-        row["is_overdue"] = bool(d.next_action_date and d.next_action_date < today)
-        enriched_actions.append(row)
-
-    enriched_acts = []
-    for a in recent_acts:
-        deal = _db.get_deal(a.deal_id) if a.deal_id else None
-        row = dataclasses.asdict(a)
-        row["deal_title"] = deal.title if deal else None
-        enriched_acts.append(row)
-
+    all_deals = _db.get_deals(include_closed=True)
+    active  = [d for d in all_deals if d.stage in ACTIVE_STAGES]
+    closed  = [d for d in all_deals if d.stage == '계약완료']
+    orders  = _db.get_orders()
     summary = _db.get_pipeline_summary()
 
+    # 매출 집계
+    total_revenue = sum(o.quantity * o.unit_price for o in orders)
+    month_revenue = sum(
+        o.quantity * o.unit_price for o in orders
+        if (o.order_date or "")[:7] == this_month
+    )
+
+    # 병원별 매출 순위
+    hosp: dict = {}
+    for o in orders:
+        acct = _db.get_account(o.account_id) if o.account_id else None
+        name = acct.name if acct else "미지정"
+        hosp[name] = hosp.get(name, 0) + o.quantity * o.unit_price
+    hospital_ranking = [
+        {"name": n, "revenue": r}
+        for n, r in sorted(hosp.items(), key=lambda x: x[1], reverse=True)[:8]
+    ]
+
+    # 월별 매출 (최근 6개월)
+    monthly: dict = {}
+    for o in orders:
+        m = (o.order_date or "")[:7]
+        if m:
+            monthly[m] = monthly.get(m, 0) + o.quantity * o.unit_price
+    monthly_trend = [
+        {"month": k, "revenue": v}
+        for k, v in sorted(monthly.items(), reverse=True)[:6]
+    ]
+
     return {
-        "today_actions": enriched_actions,
-        "summary": summary,
-        "active_count": len(active),
-        "total_value": sum(d.value for d in active),
-        "recent_activities": enriched_acts,
+        "active_count":      len(active),
+        "closed_count":      len(closed),
+        "total_revenue":     total_revenue,
+        "month_revenue":     month_revenue,
+        "hospital_ranking":  hospital_ranking,
+        "monthly_trend":     monthly_trend,
+        "summary":           summary,
     }
 
 

@@ -83,86 +83,119 @@ function fmtVal(v) {
 function fmtValShort(v) {
   if (!v) return '0원';
   const n = Number(v);
-  if (n >= 100000000) return `${(n / 100000000).toFixed(1).replace(/\.0$/, '')}억원`;
-  if (n >= 10000) return `${(n / 10000).toFixed(0)}만원`;
+  if (n >= 100000000) {
+    const oku = (n / 100000000).toFixed(1).replace(/\.0$/, '');
+    return `${Number(oku).toLocaleString()}억원`;
+  }
+  if (n >= 10000) return `${Math.round(n / 10000).toLocaleString()}만원`;
   return `${n.toLocaleString()}원`;
 }
 
 // ── Templates ─────────────────────────────────────────────────────────────────
 
 function tplDashboard(d) {
+  const {
+    active_count    = 0,
+    closed_count    = 0,
+    total_revenue   = 0,
+    month_revenue   = 0,
+    hospital_ranking = [],
+    monthly_trend   = [],
+    summary         = {},
+  } = d || {};
+
   const today = new Date();
   const dayNames = ['일','월','화','수','목','금','토'];
   const dateStr = `${today.getFullYear()}년 ${today.getMonth()+1}월 ${today.getDate()}일 (${dayNames[today.getDay()]})`;
 
-  const todayCount = d.today_actions.length;
-  const stages = state.config.stages.slice(0, -2);
-  const maxTotal = Math.max(1, ...stages.map(s => (d.summary[s]?.total || 0)));
-  const stageColors = {
-    '제안 완료': '#7B61FF', '미팅 확정': '#1B64DA', '계약 대기중': '#FF6D00',
-  };
+  // ── KPI 카드 ──
+  const kpis = [
+    { label: '활성 리드',    value: `${active_count}건`,              color: '#1B64DA', sub: '영업 진행 중' },
+    { label: '계약 완료',    value: `${closed_count}건`,              color: '#00B140', sub: '누적 계약' },
+    { label: '누적 매출',    value: fmtValShort(total_revenue),       color: '#191F28', sub: '발주 기준' },
+    { label: '이번 달 매출', value: fmtValShort(month_revenue),       color: '#FF6D00', sub: today.getMonth()+1 + '월' },
+  ].map(k => `
+    <div class="stat-card">
+      <div class="stat-label">${k.label}</div>
+      <div class="stat-value" style="color:${k.color}">${k.value}</div>
+      <div style="font-size:12px;color:var(--text-3);margin-top:2px">${k.sub}</div>
+    </div>`).join('');
 
-  const summaryRows = stages.map(s => {
-    const info = d.summary[s] || { count: 0, total: 0 };
-    if (!info.count) return '';
-    const pct = Math.max(4, Math.round((info.total / maxTotal) * 100));
-    return `
-      <div class="pipeline-row">
-        <span class="pipeline-stage">${badge(s)}</span>
-        <div class="pipeline-bar-wrap">
-          <div class="pipeline-bar" style="width:${pct}%;background:${stageColors[s]||'#8B95A1'}"></div>
-        </div>
-        <span class="pipeline-numbers"><strong>${info.count}건</strong>  ${fmtValShort(info.total)}</span>
-      </div>`;
-  }).join('');
-
-  const actionItems = d.today_actions.length
-    ? d.today_actions.map(a => {
-        const cls = a.is_overdue ? 'overdue' : 'today';
-        const dtxt = a.is_overdue ? overdueText(a.next_action_date) : '오늘';
+  // ── 병원별 매출 순위 ──
+  const ranking = hospital_ranking;
+  const maxRev = Math.max(1, ...ranking.map(r => r.revenue));
+  const rankRows = ranking.length
+    ? ranking.map((r, i) => {
+        const pct = Math.max(3, Math.round(r.revenue / maxRev * 100));
+        const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}.`;
         return `
-          <div class="action-item" onclick="openDealById(${a.id})">
-            ${badge(a.stage)}
-            <div class="action-info">
-              <div class="action-deal">${esc(a.title)} ${a.account_name ? `<span style="font-weight:400;color:var(--text-3)">· ${esc(a.account_name)}</span>` : ''}</div>
-              <div class="action-text">${esc(a.next_action) || '—'}</div>
+          <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #F2F4F6">
+            <span style="width:28px;font-size:13px;flex-shrink:0;text-align:center">${medal}</span>
+            <span style="flex:1;font-size:14px;font-weight:500;color:#191F28;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.name)}</span>
+            <div style="flex:2;background:#F2F4F6;border-radius:4px;height:8px;overflow:hidden">
+              <div style="width:${pct}%;height:100%;background:#1B64DA;border-radius:4px"></div>
             </div>
-            <span class="action-date ${cls}">${dtxt}</span>
+            <span style="font-size:13px;font-weight:600;color:#191F28;flex-shrink:0;min-width:70px;text-align:right">${fmtValShort(r.revenue)}</span>
           </div>`;
       }).join('')
-    : `<div class="empty-state" style="padding:var(--s8) var(--s5)">
-         <div class="empty-state-icon">✓</div>
-         <div class="empty-state-title">오늘 처리할 딜이 없습니다</div>
-       </div>`;
+    : `<div style="padding:32px 0;text-align:center;color:#B0B8C1;font-size:13px">발주 데이터가 없습니다</div>`;
+
+  // ── 월별 매출 추이 ──
+  const trend = monthly_trend.slice().reverse();
+  const maxTrend = Math.max(1, ...trend.map(t => t.revenue));
+  const trendBars = trend.length
+    ? trend.map(t => {
+        const pct = Math.max(4, Math.round(t.revenue / maxTrend * 100));
+        const [y, m] = t.month.split('-');
+        return `
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px">
+            <span style="font-size:11px;font-weight:600;color:#191F28">${fmtValShort(t.revenue)}</span>
+            <div style="width:100%;background:#F2F4F6;border-radius:4px;height:80px;display:flex;align-items:flex-end">
+              <div style="width:100%;height:${pct}%;background:#1B64DA;border-radius:4px;transition:height 0.3s"></div>
+            </div>
+            <span style="font-size:11px;color:#8B95A1">${m}월</span>
+          </div>`;
+      }).join('')
+    : `<div style="padding:32px 0;text-align:center;color:#B0B8C1;font-size:13px;width:100%">발주 데이터가 없습니다</div>`;
+
+  // ── 파이프라인 현황 ──
+  const stageColors = { '제안 완료':'#7B61FF', '미팅 확정':'#1B64DA', '계약 대기중':'#FF6D00' };
+  const activeStages = (state.config.stages || []).filter(s => s !== '계약완료' && s !== 'Lost');
+  const pipeRows = activeStages.map(s => {
+    const info = summary[s] || { count: 0, total: 0 };
+    if (!info.count) return '';
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #F2F4F6">
+        <span style="width:8px;height:8px;border-radius:50%;background:${stageColors[s]||'#B0B8C1'};flex-shrink:0"></span>
+        <span style="flex:1;font-size:14px;color:#191F28">${s}</span>
+        <span style="font-size:13px;font-weight:700;color:#191F28">${info.count}건</span>
+      </div>`;
+  }).join('');
 
   return `
     <div class="page-header">
       <h1 class="page-title">대시보드</h1>
       <p class="page-subtitle">${dateStr}</p>
     </div>
-    <div class="stat-grid">
-      <div class="stat-card">
-        <div class="stat-label">활성 리드</div>
-        <div class="stat-value highlight">${d.active_count}건</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">총 예상 금액</div>
-        <div class="stat-value">${fmtValShort(d.total_value) || '0원'}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">오늘 처리할 딜</div>
-        <div class="stat-value ${todayCount ? 'urgent' : ''}">${todayCount}건</div>
-      </div>
-    </div>
-    <div class="section">
-      <div class="section-header"><span class="section-title">오늘 할 일</span></div>
-      <div class="card"><div class="action-list">${actionItems}</div></div>
-    </div>
-    <div class="section">
-      <div class="section-header"><span class="section-title">파이프라인 현황</span></div>
+
+    <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:var(--s6)">${kpis}</div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s5);margin-bottom:var(--s5)">
       <div class="card">
-        ${summaryRows || `<div class="empty-state" style="padding:var(--s6)"><div class="empty-state-title">등록된 리드가 없습니다</div></div>`}
+        <div style="padding:var(--s4) var(--s5);border-bottom:1px solid var(--border);font-size:15px;font-weight:700">병원별 매출 순위</div>
+        <div style="padding:0 var(--s5) var(--s3)">${rankRows}</div>
       </div>
+      <div class="card">
+        <div style="padding:var(--s4) var(--s5);border-bottom:1px solid var(--border);font-size:15px;font-weight:700">파이프라인 현황</div>
+        <div style="padding:0 var(--s5) var(--s3)">
+          ${pipeRows || `<div style="padding:32px 0;text-align:center;color:#B0B8C1;font-size:13px">등록된 리드가 없습니다</div>`}
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="padding:var(--s4) var(--s5);border-bottom:1px solid var(--border);font-size:15px;font-weight:700">월별 매출 추이</div>
+      <div style="padding:var(--s4) var(--s5);display:flex;gap:8px;align-items:flex-end">${trendBars}</div>
     </div>`;
 }
 
@@ -190,7 +223,7 @@ async function dropCard(event, stage) {
   if (!deal || deal.stage === stage) return;
   await put(`/api/deals/${deal.id}`, { ...dealBody(deal), stage });
   showToast(`${esc(deal.title)} → ${stage}`);
-  state.data.deals = await get('/api/deals?include_lost=true');
+  state.data.deals = await get('/api/deals?include_closed=true');
   render();
 }
 function dealBody(d) {
@@ -254,7 +287,7 @@ function tplPipeline(deals) {
     const c = COL[stage] || { dot:'#B0B8C1', avatarBg:'#F9FAFB', avatarFg:'#8B95A1' };
     const stageDeals = (deals || []).filter(d => d.stage === stage);
     const totalVal   = stageDeals.reduce((s, d) => s + (d.value || 0), 0);
-    const isLost     = stage === 'Lost' || stage === '계약완료';
+    const isLost     = stage === '계약완료';
 
     const cards = stageDeals.map(d => {
       const overdue = d.next_action_date && d.next_action_date < today;

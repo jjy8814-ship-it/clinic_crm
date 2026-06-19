@@ -175,6 +175,28 @@ class DB:
                     (hospital, acct_id),
                 )
         self._c.commit()
+        # Seed: sample orders for pre-contracted hospitals
+        _seed_orders = [
+            ("강남아이디의원",      "톰더글로우 프로", 2, 438900, "2026-03-15", "납품완료"),
+            ("강남아이디의원",      "톰더글로우 프로", 1, 438900, "2026-05-20", "납품완료"),
+            ("리뉴미피부과 서초점", "톰더글로우 프로", 1, 438900, "2026-04-10", "납품완료"),
+        ]
+        for hosp_name, product, qty, price, order_date, status in _seed_orders:
+            row = self._c.execute("SELECT id FROM accounts WHERE name=?", (hosp_name,)).fetchone()
+            if not row:
+                continue
+            acct_id = row["id"]
+            exists = self._c.execute(
+                "SELECT id FROM orders WHERE account_id=? AND product_name=? AND order_date=?",
+                (acct_id, product, order_date),
+            ).fetchone()
+            if not exists:
+                self._c.execute(
+                    "INSERT INTO orders (account_id,product_name,quantity,unit_price,order_date,status) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (acct_id, product, qty, price, order_date, status),
+                )
+        self._c.commit()
 
     # ── Stages (user-editable) ────────────────────────────────────────────────
 
