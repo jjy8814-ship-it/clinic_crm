@@ -63,6 +63,20 @@
   <!-- Toast -->
   <div id="toast-container"></div>
 
-  <script src="/static/app.js?v=3"></script>
+  <!-- Side Panel Backdrop -->
+  <div id="side-panel-backdrop" onclick="closeSidePanel()"></div>
+
+  <!-- Side Panel -->
+  <div id="side-panel">
+    <div class="side-panel-header">
+      <span class="side-panel-title" id="side-panel-title">상세 정보</span>
+      <button class="modal-close" onclick="closeSidePanel()">
+        <svg viewBox="0 0 20 20" fill="none"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="side-panel-body" id="side-panel-body"></div>
+  </div>
+
+  <script src="/static/app.js?v=4"></script>
 </body>
 </html>

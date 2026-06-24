@@ -6,8 +6,11 @@ const state = {
   page: 'dashboard',
   stageFilter: 'all',
   accounts: [],
-  config: { stages: [], tiers: [], activity_types: [] },
+  config: { stages: [], tiers: [], activity_types: [], products: [] },
   data: {},
+  contactSearch: '',
+  contactSort: 'name-asc',
+  activitySort: 'newest',
 };
 
 // ── Init ───────────────────────────────────────────────────────────────────────
@@ -37,9 +40,10 @@ async function navigate(page) {
     } else if (page === 'contacts') {
       state.accounts = await get('/api/accounts');
     } else if (page === 'orders') {
-      [state.data.orders, state.accounts] = await Promise.all([
-        get('/api/orders'), get('/api/accounts'),
+      [state.data.orders, state.accounts, state.data.products] = await Promise.all([
+        get('/api/orders'), get('/api/accounts'), get('/api/products'),
       ]);
+      state.config.products = state.data.products || [];
       state.orderAccountFilter = 'all';
     } else if (page === 'activities') {
       state.data.activities = await get('/api/activities');
@@ -140,7 +144,7 @@ function tplDashboard(d) {
         return `
           <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #F2F4F6">
             <span style="width:28px;font-size:13px;flex-shrink:0;text-align:center">${medal}</span>
-            <span style="flex:1;font-size:14px;font-weight:500;color:#191F28;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.name)}</span>
+            <span style="flex:1;font-size:14px;font-weight:500;color:#191F28;white-space:normal;word-break:keep-all">${esc(r.name)}</span>
             <div style="flex:2;background:#F2F4F6;border-radius:4px;height:8px;overflow:hidden">
               <div style="width:${pct}%;height:100%;background:#1B64DA;border-radius:4px"></div>
             </div>
@@ -238,7 +242,8 @@ async function dropCard(event, stage) {
 function dealBody(d) {
   return { title: d.title, account_id: d.account_id, stage: d.stage,
     value: d.value, next_action: d.next_action,
-    next_action_date: d.next_action_date, notes: d.notes, source: d.source || '' };
+    next_action_date: d.next_action_date, notes: d.notes, source: d.source || '',
+    source_detail: d.source_detail || '' };
 }
 function openDealModalInStage(stage) { openDealModal({ stage }); }
 
@@ -326,6 +331,7 @@ function tplPipeline(deals) {
             <span style="font-size:12px;color:#8B95A1;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.next_action ? esc(d.next_action) : '<span style="color:#D1D5DB">다음 액션 없음</span>'}</span>
             ${dateTxt ? `<span class="deal-date ${dateCls}" style="flex-shrink:0;font-size:12px">${dateTxt}</span>` : ''}
             <div class="kcard-btns" onclick="event.stopPropagation()">
+              <button class="btn btn-sm btn-secondary" style="height:26px;padding:0 10px;font-size:11px" onclick="openSidePanel(${d.id})">패널</button>
               <button class="btn btn-sm btn-secondary" style="height:26px;padding:0 10px;font-size:11px" onclick="openActivityModal(${d.id},'${titleEsc}')">활동</button>
               <button class="btn btn-sm btn-danger" style="height:26px;padding:0 10px;font-size:11px" onclick="confirmDeleteDeal(${d.id},'${titleEsc}')">삭제</button>
             </div>
@@ -369,12 +375,29 @@ function tplPipeline(deals) {
 
 
 function tplContacts(accounts) {
-  const cards = accounts.length
-    ? accounts.map(a => `
+  const search = (state.contactSearch || '').toLowerCase();
+  const sort   = state.contactSort || 'name-asc';
+
+  let list = [...accounts];
+  if (search) {
+    list = list.filter(a =>
+      (a.name || '').toLowerCase().includes(search) ||
+      (a.contact_name || '').toLowerCase().includes(search)
+    );
+  }
+  if (sort === 'name-asc')  list.sort((a,b) => a.name.localeCompare(b.name));
+  if (sort === 'name-desc') list.sort((a,b) => b.name.localeCompare(a.name));
+  if (sort === 'deals')     list.sort((a,b) => (b.deal_count||0) - (a.deal_count||0));
+
+  const sortBtn = (id, label) =>
+    `<button class="filter-tab ${sort===id?'active':''}" onclick="setContactSort('${id}')">${label}</button>`;
+
+  const cards = list.length
+    ? list.map(a => `
         <div class="account-card" onclick="openAccountModal(${a.id})">
           <div class="account-card-header">
             <div>
-              <div class="account-name">${esc(a.name)}</div>
+              <div class="account-name clickable-name" onclick="event.stopPropagation();openAccountSidePanel(${a.id})">${esc(a.name)}</div>
               <div style="margin-top:6px">${badge2(a.tier, tierBadgeCls(a.tier))}</div>
             </div>
             <div class="account-card-actions" onclick="event.stopPropagation()">
@@ -409,7 +432,26 @@ function tplContacts(accounts) {
         <button class="btn btn-primary" onclick="openAccountModal(null)">+ 거래처 추가</button>
       </div>
     </div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:var(--s4)">
+      <input class="form-input" style="max-width:260px;height:38px" placeholder="거래처 검색..."
+        value="${esc(state.contactSearch||'')}" oninput="setContactSearch(this.value)">
+      <div class="filter-tabs" style="margin-bottom:0">
+        ${sortBtn('name-asc','이름 ▲')}
+        ${sortBtn('name-desc','이름 ▼')}
+        ${sortBtn('deals','딜 많은순')}
+      </div>
+    </div>
     <div class="account-grid">${cards}</div>`;
+}
+
+function setContactSearch(v) {
+  state.contactSearch = v;
+  render();
+}
+
+function setContactSort(v) {
+  state.contactSort = v;
+  render();
 }
 
 // ── Activities ─────────────────────────────────────────────────────────────────
@@ -417,6 +459,7 @@ function tplContacts(accounts) {
 function tplActivities(activities) {
   const all = activities || [];
   const filter = state.activityTypeFilter || 'all';
+  const sortDir = state.activitySort || 'newest';
   const types = state.config.activity_types || [];
 
   const typePills = [['all', `전체 (${all.length}건)`],
@@ -425,7 +468,9 @@ function tplActivities(activities) {
     `<button class="filter-tab ${filter === id ? 'active' : ''}" onclick="setActivityTypeFilter('${id}')">${label}</button>`
   ).join('');
 
-  const filtered = filter === 'all' ? all : all.filter(a => a.type === filter);
+  let filtered = filter === 'all' ? [...all] : all.filter(a => a.type === filter);
+  if (sortDir === 'oldest') filtered.sort((a,b) => (a.date||'').localeCompare(b.date||''));
+  else filtered.sort((a,b) => (b.date||'').localeCompare(a.date||''));
 
   const typeColor = { '통화': '#1B64DA', '미팅': '#00B140', '이메일': '#7B61FF', '문자': '#FF6D00', '기타': '#8B95A1' };
   const typeBadge = t => `<span style="font-size:11px;font-weight:600;color:#fff;background:${typeColor[t]||'#8B95A1'};border-radius:20px;padding:2px 9px">${t}</span>`;
@@ -446,6 +491,10 @@ function tplActivities(activities) {
   return `
     <div class="page-header-row">
       <h1 class="page-title">활동 로그</h1>
+      <div style="display:flex;gap:8px">
+        <button class="filter-tab ${sortDir==='newest'?'active':''}" onclick="setActivitySort('newest')">최신순</button>
+        <button class="filter-tab ${sortDir==='oldest'?'active':''}" onclick="setActivitySort('oldest')">오래된순</button>
+      </div>
     </div>
     <div class="filter-tabs" style="margin-bottom:var(--s4)">${typePills}</div>
     <div class="card" style="overflow-x:auto">
@@ -465,6 +514,11 @@ function tplActivities(activities) {
 
 function setActivityTypeFilter(type) {
   state.activityTypeFilter = type;
+  render();
+}
+
+function setActivitySort(dir) {
+  state.activitySort = dir;
   render();
 }
 
@@ -493,6 +547,9 @@ function tplPL(pl, expenses) {
   const t = pl?.total || {};
   const rows = pl?.rows || [];
   const exps = expenses || [];
+  const expensesDetail = pl?.expenses_detail || {};
+  const ordersDetail   = pl?.orders_detail   || {};
+  const selectedMonth  = state.plSelectedMonth || '';
 
   const fmt  = v => (v || 0).toLocaleString() + '원';
   const sign = v => v >= 0
@@ -502,28 +559,87 @@ function tplPL(pl, expenses) {
   const summaryCards = [
     { label: '총 매출',     value: fmt(t.revenue),   color: '#191F28' },
     { label: '매출원가',    value: fmt(t.cogs),      color: '#F04452' },
-    { label: '판관비 합계', value: fmt(t.expenses),  color: '#FF6D00' },
-    { label: '영업이익',    value: t.operating >= 0 ? fmt(t.operating) : fmt(t.operating), color: (t.operating||0) >= 0 ? '#00B140' : '#F04452' },
+    { label: '비용 합계',   value: fmt(t.expenses),  color: '#FF6D00' },
+    { label: '영업이익',    value: fmt(t.operating), color: (t.operating||0) >= 0 ? '#00B140' : '#F04452' },
   ].map(c => `
     <div class="stat-card">
       <div class="stat-label">${c.label}</div>
       <div class="stat-value" style="color:${c.color}">${c.value}</div>
     </div>`).join('');
 
-  const monthRows = rows.length ? rows.map(r => `
-    <tr>
-      <td style="font-weight:600">${r.month}</td>
-      <td style="text-align:right">${r.units}대</td>
-      <td style="text-align:right">${(r.revenue).toLocaleString()}</td>
-      <td style="text-align:right;color:#F04452">${(r.cogs).toLocaleString()}</td>
-      <td style="text-align:right;color:#FF6D00">${(r.expenses).toLocaleString()}</td>
-      <td style="text-align:right;font-weight:700">${sign(r.operating)}</td>
-    </tr>`).join('')
-  : `<tr><td colspan="6" style="text-align:center;padding:24px;color:#B0B8C1">발주 데이터가 없습니다</td></tr>`;
+  const CATS = ['판관비', '마케팅비', '고정비'];
+
+  const monthRows = rows.length ? rows.map(r => {
+    const catCols = CATS.map(cat =>
+      `<td style="text-align:right;color:#FF6D00">${((r.cat_totals||{})[cat]||0).toLocaleString()}</td>`
+    ).join('');
+    return `
+      <tr style="cursor:pointer" onclick="setPLMonth('${r.month}')" title="${r.month} 상세 보기">
+        <td style="font-weight:600;color:${selectedMonth===r.month?'#1B64DA':'inherit'}">${r.month}${selectedMonth===r.month?' ▶':''}</td>
+        <td style="text-align:right">${r.units}대</td>
+        <td style="text-align:right">${(r.revenue).toLocaleString()}</td>
+        <td style="text-align:right;color:#F04452">${(r.cogs).toLocaleString()}</td>
+        ${catCols}
+        <td style="text-align:right;font-weight:700">${sign(r.operating)}</td>
+      </tr>`;
+  }).join('')
+  : `<tr><td colspan="${4+CATS.length}" style="text-align:center;padding:24px;color:#B0B8C1">발주 데이터가 없습니다</td></tr>`;
+
+  // Month detail panel
+  let detailHtml = '';
+  if (selectedMonth) {
+    const monthOrders   = ordersDetail[selectedMonth]   || [];
+    const monthExpenses = expensesDetail[selectedMonth] || [];
+    const monthRevenue  = monthOrders.reduce((s,o) => s+(o.total_price||0), 0);
+    const monthCogs     = monthOrders.reduce((s,o) => s+(o.quantity||0), 0) * 111419;
+    const monthExpTotal = monthExpenses.reduce((s,e) => s+(e.amount||0), 0);
+    const monthOp       = monthRevenue - monthCogs - monthExpTotal;
+
+    const orderRows2 = monthOrders.length ? monthOrders.map(o => `
+      <tr>
+        <td>${esc(o.account_name||'—')}</td>
+        <td>${esc(o.product_name)}</td>
+        <td style="text-align:center">${o.quantity}대</td>
+        <td style="text-align:right;font-weight:600">${(o.total_price||0).toLocaleString()}원</td>
+      </tr>`).join('')
+    : `<tr><td colspan="4" style="text-align:center;color:#B0B8C1;padding:16px">발주 없음</td></tr>`;
+
+    const expRows2 = monthExpenses.length ? monthExpenses.map(e => `
+      <tr>
+        <td><span style="font-size:11px;background:#F2F4F6;padding:1px 6px;border-radius:4px">${esc(e.category||'판관비')}</span></td>
+        <td>${esc(e.name)}</td>
+        <td style="text-align:right;font-weight:600">${(e.amount||0).toLocaleString()}원</td>
+        <td>${esc(e.notes||'')}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="4" style="text-align:center;color:#B0B8C1;padding:16px">비용 없음</td></tr>`;
+
+    detailHtml = `
+      <div class="card" style="margin-bottom:var(--s5)">
+        <div style="padding:var(--s4) var(--s5);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+          <span style="font-weight:700;font-size:15px">${selectedMonth} 상세</span>
+          <button class="btn btn-sm btn-secondary" onclick="setPLMonth('')">닫기</button>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s4);padding:var(--s4) var(--s5)">
+          <div style="font-size:13px;color:var(--text-3)">매출 <strong style="color:#191F28;font-size:15px">${monthRevenue.toLocaleString()}원</strong></div>
+          <div style="font-size:13px;color:var(--text-3)">원가 <strong style="color:#F04452;font-size:15px">${monthCogs.toLocaleString()}원</strong></div>
+          <div style="font-size:13px;color:var(--text-3)">비용 <strong style="color:#FF6D00;font-size:15px">${monthExpTotal.toLocaleString()}원</strong></div>
+          <div style="font-size:13px;color:var(--text-3)">영업이익 <strong style="color:${monthOp>=0?'#00B140':'#F04452'};font-size:15px">${monthOp.toLocaleString()}원</strong></div>
+        </div>
+        <div style="padding:0 var(--s5) var(--s3)">
+          <div style="font-size:13px;font-weight:600;color:var(--text-2);margin-bottom:var(--s2)">발주 목록</div>
+          <table class="order-table"><thead><tr><th>병원명</th><th>제품</th><th style="text-align:center">수량</th><th style="text-align:right">금액</th></tr></thead>
+          <tbody>${orderRows2}</tbody></table>
+          <div style="font-size:13px;font-weight:600;color:var(--text-2);margin:var(--s4) 0 var(--s2)">비용 목록</div>
+          <table class="order-table"><thead><tr><th>카테고리</th><th>항목명</th><th style="text-align:right">금액</th><th>메모</th></tr></thead>
+          <tbody>${expRows2}</tbody></table>
+        </div>
+      </div>`;
+  }
 
   const expRows = exps.length ? exps.map(e => `
     <tr>
       <td>${esc(e.month || '—')}</td>
+      <td><span style="font-size:11px;background:#F2F4F6;padding:1px 6px;border-radius:4px">${esc(e.category||'판관비')}</span></td>
       <td>${esc(e.name)}</td>
       <td style="text-align:right;font-weight:600">${(e.amount).toLocaleString()}원</td>
       <td>${esc(e.notes || '')}</td>
@@ -532,7 +648,9 @@ function tplPL(pl, expenses) {
         <button class="btn btn-sm btn-danger"    style="height:26px;padding:0 10px;font-size:11px" onclick="confirmDeleteExpense(${e.id},'${esc(e.name).replace(/'/g,"\\'")}')">삭제</button>
       </td>
     </tr>`).join('')
-  : `<tr><td colspan="5" style="text-align:center;padding:24px;color:#B0B8C1">등록된 판관비 항목이 없습니다</td></tr>`;
+  : `<tr><td colspan="6" style="text-align:center;padding:24px;color:#B0B8C1">등록된 비용 항목이 없습니다</td></tr>`;
+
+  const catHeaders = CATS.map(c => `<th style="text-align:right">${c}</th>`).join('');
 
   return `
     <div class="page-header-row">
@@ -540,13 +658,16 @@ function tplPL(pl, expenses) {
     </div>
     <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:var(--s5)">${summaryCards}</div>
 
+    ${detailHtml}
+
     <div class="card" style="margin-bottom:var(--s5);overflow-x:auto">
-      <div style="padding:var(--s4) var(--s5);border-bottom:1px solid var(--border);font-weight:700;font-size:15px">월별 손익</div>
+      <div style="padding:var(--s4) var(--s5);border-bottom:1px solid var(--border);font-weight:700;font-size:15px">월별 손익 <span style="font-size:12px;font-weight:400;color:var(--text-3)">(행 클릭 시 상세)</span></div>
       <table class="order-table">
         <thead><tr>
           <th>월</th><th style="text-align:right">판매량</th>
           <th style="text-align:right">매출</th><th style="text-align:right">원가</th>
-          <th style="text-align:right">판관비</th><th style="text-align:right">영업이익</th>
+          ${catHeaders}
+          <th style="text-align:right">영업이익</th>
         </tr></thead>
         <tbody>${monthRows}</tbody>
       </table>
@@ -554,14 +675,19 @@ function tplPL(pl, expenses) {
 
     <div class="card" style="overflow-x:auto">
       <div style="padding:var(--s4) var(--s5);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
-        <span style="font-weight:700;font-size:15px">판관비 항목</span>
+        <span style="font-weight:700;font-size:15px">비용 항목</span>
         <button class="btn btn-primary" style="height:34px;padding:0 14px;font-size:13px" onclick="openExpenseModal(null)">+ 항목 추가</button>
       </div>
       <table class="order-table">
-        <thead><tr><th>월</th><th>항목명</th><th style="text-align:right">금액</th><th>메모</th><th style="text-align:center">관리</th></tr></thead>
+        <thead><tr><th>월</th><th>카테고리</th><th>항목명</th><th style="text-align:right">금액</th><th>메모</th><th style="text-align:center">관리</th></tr></thead>
         <tbody>${expRows}</tbody>
       </table>
     </div>`;
+}
+
+function setPLMonth(m) {
+  state.plSelectedMonth = m;
+  render();
 }
 
 function openExpenseModal(idOrNull) {
@@ -569,7 +695,9 @@ function openExpenseModal(idOrNull) {
     ? (state.data.expenses || []).find(x => x.id === idOrNull) || {}
     : {};
   const today = new Date().toISOString().slice(0, 7);
-  openModal(e.id ? '판관비 수정' : '판관비 추가', `
+  const CATS = ['판관비', '마케팅비', '고정비'];
+  const catOpts = CATS.map(c => `<option value="${c}" ${(e.category||'판관비')===c?'selected':''}>${c}</option>`).join('');
+  openModal(e.id ? '비용 수정' : '비용 추가', `
     <form class="form" id="expense-form" onsubmit="saveExpense(event)" data-id="${e.id || ''}">
       <div class="form-row">
         <div class="form-group">
@@ -577,13 +705,19 @@ function openExpenseModal(idOrNull) {
           <input class="form-input" name="month" type="month" value="${e.month || today}" required>
         </div>
         <div class="form-group">
+          <label class="form-label">카테고리</label>
+          <select class="form-select" name="category">${catOpts}</select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">항목명 <span class="req">*</span></label>
+          <input class="form-input" name="name" value="${esc(e.name || '')}" placeholder="인건비, 임대료, 마케팅비 등" required>
+        </div>
+        <div class="form-group">
           <label class="form-label">금액 (원) <span class="req">*</span></label>
           <input class="form-input" name="amount" type="number" value="${e.amount || ''}" placeholder="0" min="0" required>
         </div>
-      </div>
-      <div class="form-group">
-        <label class="form-label">항목명 <span class="req">*</span></label>
-        <input class="form-input" name="name" value="${esc(e.name || '')}" placeholder="인건비, 임대료, 마케팅비 등" required>
       </div>
       <div class="form-group">
         <label class="form-label">메모</label>
@@ -601,10 +735,11 @@ async function saveExpense(event) {
   const form = event.target;
   const fd = new FormData(form);
   const body = {
-    name:   fd.get('name').trim(),
-    amount: parseInt(fd.get('amount')) || 0,
-    month:  fd.get('month') || '',
-    notes:  fd.get('notes').trim(),
+    name:     fd.get('name').trim(),
+    amount:   parseInt(fd.get('amount')) || 0,
+    month:    fd.get('month') || '',
+    notes:    fd.get('notes').trim(),
+    category: fd.get('category') || '판관비',
   };
   const id = form.dataset.id;
   await (id ? put(`/api/expenses/${id}`, body) : post('/api/expenses', body));
@@ -679,7 +814,7 @@ function tplOrders(orders) {
   const rows = filtered.length
     ? filtered.map(o => `
         <tr onclick="openOrderModal(${o.id})" style="cursor:pointer">
-          <td>${esc(o.account_name || '—')}</td>
+          <td><span class="clickable-name" onclick="event.stopPropagation();${o.account_id?`openAccountSidePanel(${o.account_id})`:''}">${esc(o.account_name || '—')}</span></td>
           <td>${esc(o.product_name)}</td>
           <td style="text-align:center;font-weight:600">${o.quantity}대</td>
           <td style="text-align:right">${fmtVal(o.unit_price)}</td>
@@ -699,7 +834,10 @@ function tplOrders(orders) {
   return `
     <div class="page-header-row">
       <h1 class="page-title">발주 현황</h1>
-      <button class="btn btn-primary" onclick="openOrderModal(null)">+ 발주 등록</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-secondary" onclick="openProductsModal()">제품 관리</button>
+        <button class="btn btn-primary" onclick="openOrderModal(null)">+ 발주 등록</button>
+      </div>
     </div>
     <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:var(--s5)">
       <div class="stat-card">
@@ -754,19 +892,21 @@ function openDealModal(dealOrNull) {
   const contactName  = acct?.contact_name || '';
   const phone        = acct?.phone || '';
   const email        = acct?.email || '';
-  const acctDatalist = state.accounts.map(a => `<option value="${esc(a.name)}">`).join('');
   const stageOpts    = state.config.stages.map(s =>
     `<option value="${s}" ${(d.stage || '제안 완료') === s ? 'selected' : ''}>${s}</option>`
   ).join('');
+
+  // source_detail visibility
+  const detailSources = ['부스/행사', '소개/레퍼럴', '기타'];
+  const showDetail = detailSources.includes(d.source || '');
 
   openModal(d.id ? '리드 편집' : '새 리드 추가', `
     <form class="form" id="deal-form" onsubmit="saveDeal(event)" data-id="${d.id || ''}">
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">병원명 <span class="req">*</span></label>
-          <input class="form-input" name="hospital_name" list="acct-datalist"
+          <input class="form-input" name="hospital_name"
             value="${esc(hospitalName)}" placeholder="강남스킨케어의원" required>
-          <datalist id="acct-datalist">${acctDatalist}</datalist>
         </div>
         <div class="form-group">
           <label class="form-label">고객명 (담당자)</label>
@@ -801,10 +941,10 @@ function openDealModal(dealOrNull) {
         <label class="form-label">다음 액션 날짜</label>
         <input class="form-input" name="next_action_date" type="date" value="${d.next_action_date||''}">
       </div>
-      <div class="form-row">
+      <div class="form-row" style="align-items:flex-end">
         <div class="form-group">
           <label class="form-label">리드 출처</label>
-          <select class="form-select" name="source">
+          <select class="form-select" name="source" onchange="onSourceChange(this)">
             <option value="" ${!d.source ? 'selected' : ''}>미지정</option>
             <option value="아웃바운드" ${d.source === '아웃바운드' ? 'selected' : ''}>아웃바운드</option>
             <option value="인바운드" ${d.source === '인바운드' ? 'selected' : ''}>인바운드</option>
@@ -813,7 +953,10 @@ function openDealModal(dealOrNull) {
             <option value="기타" ${d.source === '기타' ? 'selected' : ''}>기타</option>
           </select>
         </div>
-        <div class="form-group" style="visibility:hidden"></div>
+        <div class="form-group" id="source-detail-group" style="${showDetail ? '' : 'display:none'}">
+          <label class="form-label">출처 상세</label>
+          <input class="form-input" name="source_detail" value="${esc(d.source_detail||'')}" placeholder="행사명, 소개자 등">
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label">메모</label>
@@ -824,6 +967,12 @@ function openDealModal(dealOrNull) {
         <button type="button" class="btn btn-secondary btn-full" onclick="closeModal()">취소</button>
       </div>
     </form>`);
+}
+
+function onSourceChange(sel) {
+  const detailSources = ['부스/행사', '소개/레퍼럴', '기타'];
+  const grp = document.getElementById('source-detail-group');
+  if (grp) grp.style.display = detailSources.includes(sel.value) ? '' : 'none';
 }
 
 async function openDealById(id) {
@@ -920,10 +1069,16 @@ function setOrderFilter(id) {
   render();
 }
 
-const PRODUCT_PRICES = {
-  '톰더글로우':     0,
-  '톰더글로우 프로': 438900,
-};
+function getProductPriceMap() {
+  const map = {};
+  (state.config.products || []).forEach(p => { map[p.name] = p.unit_price; });
+  // fallback hardcoded if products empty
+  if (!Object.keys(map).length) {
+    map['톰더글로우'] = 0;
+    map['톰더글로우 프로'] = 438900;
+  }
+  return map;
+}
 
 function calcOrderTotal() {
   const qty   = parseInt(document.getElementById('order-quantity')?.value) || 0;
@@ -933,7 +1088,8 @@ function calcOrderTotal() {
 }
 
 function onProductChange(sel) {
-  const price = PRODUCT_PRICES[sel.value];
+  const map = getProductPriceMap();
+  const price = map[sel.value];
   const priceInput = document.getElementById('order-unit-price');
   if (priceInput && price != null) { priceInput.value = price || ''; calcOrderTotal(); }
 }
@@ -943,25 +1099,26 @@ function openOrderModal(idOrNull) {
     ? (state.data.orders || []).find(x => x.id === idOrNull) || {}
     : {};
   const today = new Date().toISOString().split('T')[0];
-  const acctOpts = state.accounts.map(a =>
-    `<option value="${a.id}" ${o.account_id === a.id ? 'selected' : ''}>${esc(a.name)}</option>`
-  ).join('');
   const statusOpts = (state.config.order_statuses || ['발주완료','납품완료','취소']).map(s =>
     `<option value="${s}" ${(o.status || '발주완료') === s ? 'selected' : ''}>${s}</option>`
   ).join('');
-  const currentProduct = o.product_name || '톰더글로우 프로';
-  const productOpts = Object.keys(PRODUCT_PRICES).map(p =>
+  const PRODUCT_PRICES = getProductPriceMap();
+  const productNames = Object.keys(PRODUCT_PRICES);
+  const currentProduct = o.product_name || (productNames[0] || '톰더글로우 프로');
+  const productOpts = productNames.map(p =>
     `<option value="${p}" ${currentProduct === p ? 'selected' : ''}>${p}${PRODUCT_PRICES[p] ? ' — ' + PRODUCT_PRICES[p].toLocaleString() + '원' : ''}</option>`
   ).join('');
+
+  const acctDatalistOrder = state.accounts.map(a => `<option value="${esc(a.name)}">`).join('');
+  const currentAcctName = o.account_id ? (state.accounts.find(a => a.id === o.account_id)?.name || '') : '';
 
   openModal(o.id ? '발주 편집' : '발주 등록', `
     <form class="form" id="order-form" onsubmit="saveOrder(event)" data-id="${o.id || ''}">
       <div class="form-group">
         <label class="form-label">병원명 <span class="req">*</span></label>
-        <select class="form-select" name="account_id" required>
-          <option value="">선택</option>
-          ${acctOpts}
-        </select>
+        <input class="form-input" name="account_name_search" list="order-acct-datalist"
+          value="${esc(currentAcctName)}" placeholder="병원명 검색..." autocomplete="off" required>
+        <datalist id="order-acct-datalist">${acctDatalistOrder}</datalist>
       </div>
       <div class="form-row">
         <div class="form-group">
@@ -1013,8 +1170,10 @@ async function saveOrder(event) {
   event.preventDefault();
   const form = event.target;
   const fd = new FormData(form);
+  const searchedName = (fd.get('account_name_search') || '').trim();
+  const matchedAcct = state.accounts.find(a => a.name === searchedName);
   const body = {
-    account_id:    parseInt(fd.get('account_id')) || null,
+    account_id:    matchedAcct ? matchedAcct.id : null,
     product_name:  fd.get('product_name').trim() || '톰더글로우',
     quantity:      parseInt(fd.get('quantity')) || 1,
     unit_price:    parseInt(fd.get('unit_price')) || 0,
@@ -1353,6 +1512,7 @@ async function saveDeal(event) {
     next_action_date: fd.get('next_action_date')  || '',
     notes:            (fd.get('notes')            || '').trim(),
     source:           (fd.get('source')           || '').trim(),
+    source_detail:    (fd.get('source_detail')    || '').trim(),
   };
   const id = form.dataset.id;
   await (id ? put(`/api/deals/${id}`, body) : post('/api/deals', body));
@@ -1485,6 +1645,231 @@ async function del(url) {
   const r = await fetch(url, { method: 'DELETE' });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
+}
+
+// ── Side Panel ────────────────────────────────────────────────────────────────
+
+function openSidePanel(dealId) {
+  const panel = document.getElementById('side-panel');
+  const backdrop = document.getElementById('side-panel-backdrop');
+  const title = document.getElementById('side-panel-title');
+  const body = document.getElementById('side-panel-body');
+  if (!panel) return;
+
+  const deal = (state.data.deals || []).find(d => d.id === dealId);
+  title.textContent = deal ? deal.title : '리드 정보';
+  body.innerHTML = '<div style="color:var(--text-3);text-align:center;padding:40px">불러오는 중...</div>';
+  panel.classList.add('open');
+  if (backdrop) backdrop.classList.add('open');
+
+  get(`/api/activities?deal_id=${dealId}`).then(activities => {
+    const typeColor = { '통화': '#1B64DA', '미팅': '#00B140', '이메일': '#7B61FF', '문자': '#FF6D00', '기타': '#8B95A1' };
+    const acct = deal?.account_id ? state.accounts.find(a => a.id === deal.account_id) : null;
+
+    const infoHtml = deal ? `
+      <div style="background:var(--gray-50);border-radius:10px;padding:var(--s4);margin-bottom:var(--s5)">
+        <div style="font-size:15px;font-weight:700;margin-bottom:var(--s3)">${esc(deal.title)}</div>
+        ${deal.stage ? `<div style="margin-bottom:var(--s2)">${badge(deal.stage)}</div>` : ''}
+        ${deal.value ? `<div style="font-size:14px;color:var(--text-2);margin-bottom:var(--s1)">금액: <strong>${fmtVal(deal.value)}</strong></div>` : ''}
+        ${deal.source ? `<div style="font-size:13px;color:var(--text-3)">출처: ${esc(deal.source)}${deal.source_detail ? ' / ' + esc(deal.source_detail) : ''}</div>` : ''}
+        ${acct ? `<div style="font-size:13px;color:var(--text-3);margin-top:var(--s1)">거래처: <span class="clickable-name" onclick="openAccountSidePanel(${acct.id})">${esc(acct.name)}</span></div>` : ''}
+        ${deal.next_action ? `<div style="font-size:13px;color:var(--text-2);margin-top:var(--s2)">다음 액션: ${esc(deal.next_action)} ${deal.next_action_date ? '('+deal.next_action_date+')' : ''}</div>` : ''}
+      </div>` : '';
+
+    const actHtml = activities.length ? activities.map(a => `
+      <div style="display:flex;gap:var(--s3);padding:var(--s3) 0;border-bottom:1px solid var(--gray-100)">
+        <div style="flex-shrink:0;text-align:center;width:52px">
+          <div style="font-size:11px;color:var(--text-3)">${a.date||''}</div>
+          <span style="font-size:11px;font-weight:600;color:#fff;background:${typeColor[a.type]||'#8B95A1'};border-radius:20px;padding:1px 6px;display:inline-block;margin-top:4px">${esc(a.type)}</span>
+        </div>
+        <div style="flex:1;font-size:13px;color:var(--text-2);line-height:1.5;white-space:pre-wrap">${esc(a.notes||'')}</div>
+      </div>`).join('')
+    : `<div style="text-align:center;color:var(--text-3);padding:24px;font-size:13px">활동 기록이 없습니다</div>`;
+
+    body.innerHTML = `
+      ${infoHtml}
+      <div style="font-size:14px;font-weight:700;color:var(--text-1);margin-bottom:var(--s3)">활동 로그 (${activities.length}건)</div>
+      <div style="display:flex;justify-content:flex-end;margin-bottom:var(--s3)">
+        <button class="btn btn-sm btn-primary" onclick="openActivityModal(${dealId},'${esc(deal?.title||'').replace(/'/g,"\\'")}')">+ 활동 기록</button>
+      </div>
+      ${actHtml}`;
+  }).catch(() => {
+    body.innerHTML = '<div style="color:var(--red-500);padding:16px">불러오기 실패</div>';
+  });
+}
+
+async function openAccountSidePanel(accountId) {
+  const panel = document.getElementById('side-panel');
+  const backdrop = document.getElementById('side-panel-backdrop');
+  const title = document.getElementById('side-panel-title');
+  const body = document.getElementById('side-panel-body');
+  if (!panel) return;
+
+  const acct = state.accounts.find(a => a.id === accountId);
+  title.textContent = acct ? acct.name : '거래처 정보';
+  body.innerHTML = '<div style="color:var(--text-3);text-align:center;padding:40px">불러오는 중...</div>';
+  panel.classList.add('open');
+  if (backdrop) backdrop.classList.add('open');
+
+  try {
+    const [deals, orders] = await Promise.all([
+      get('/api/deals?include_closed=true'),
+      get(`/api/orders?account_id=${accountId}`),
+    ]);
+    const acctDeals = deals.filter(d => d.account_id === accountId);
+    const acctOrders = orders;
+
+    const infoHtml = acct ? `
+      <div style="background:var(--gray-50);border-radius:10px;padding:var(--s4);margin-bottom:var(--s5)">
+        <div style="font-size:15px;font-weight:700;margin-bottom:var(--s2)">${esc(acct.name)}</div>
+        ${badge2(acct.tier, tierBadgeCls(acct.tier))}
+        <div style="margin-top:var(--s3);display:flex;flex-direction:column;gap:var(--s1);font-size:13px;color:var(--text-2)">
+          ${acct.contact_name ? `<div>👤 ${esc(acct.contact_name)}</div>` : ''}
+          ${acct.phone ? `<div>📞 ${esc(acct.phone)}</div>` : ''}
+          ${acct.email ? `<div>✉ ${esc(acct.email)}</div>` : ''}
+          ${acct.address ? `<div>📍 ${esc(acct.address)}</div>` : ''}
+        </div>
+        <div style="margin-top:var(--s3)">
+          <button class="btn btn-sm btn-secondary" onclick="openAccountModal(${accountId})">정보 수정</button>
+        </div>
+      </div>` : '';
+
+    const dealRows = acctDeals.length ? acctDeals.map(d => `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:var(--s2) 0;border-bottom:1px solid var(--gray-100);cursor:pointer" onclick="openDealById(${d.id})">
+        <div>
+          <div style="font-size:14px;font-weight:500">${esc(d.title)}</div>
+          <div style="margin-top:2px">${badge(d.stage)}</div>
+        </div>
+        <div style="font-size:13px;font-weight:600">${d.value ? fmtValShort(d.value) : '—'}</div>
+      </div>`).join('')
+    : `<div style="text-align:center;color:var(--text-3);padding:16px;font-size:13px">리드 없음</div>`;
+
+    const orderRows = acctOrders.length ? acctOrders.map(o => `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:var(--s2) 0;border-bottom:1px solid var(--gray-100)">
+        <div>
+          <div style="font-size:13px;font-weight:500">${esc(o.product_name)}</div>
+          <div style="font-size:12px;color:var(--text-3)">${o.order_date||''} · ${o.status||''}</div>
+        </div>
+        <div style="font-size:13px;font-weight:600">${fmtValShort(o.total_price||0)}</div>
+      </div>`).join('')
+    : `<div style="text-align:center;color:var(--text-3);padding:16px;font-size:13px">발주 없음</div>`;
+
+    body.innerHTML = `
+      ${infoHtml}
+      <div style="font-size:14px;font-weight:700;margin-bottom:var(--s3)">리드 (${acctDeals.length}건)</div>
+      <div style="margin-bottom:var(--s5)">${dealRows}</div>
+      <div style="font-size:14px;font-weight:700;margin-bottom:var(--s3)">발주 (${acctOrders.length}건)</div>
+      ${orderRows}`;
+  } catch(e) {
+    body.innerHTML = '<div style="color:var(--red-500);padding:16px">불러오기 실패</div>';
+  }
+}
+
+function closeSidePanel() {
+  const panel = document.getElementById('side-panel');
+  const backdrop = document.getElementById('side-panel-backdrop');
+  if (panel) panel.classList.remove('open');
+  if (backdrop) backdrop.classList.remove('open');
+}
+
+// ── Products Modal ─────────────────────────────────────────────────────────────
+
+async function openProductsModal() {
+  const products = await get('/api/products');
+  state.config.products = products;
+  state.data.products = products;
+  renderProductsModal();
+}
+
+function renderProductsModal() {
+  const products = state.data.products || [];
+  const rows = products.length ? products.map(p => `
+    <tr>
+      <td style="font-weight:600">${esc(p.name)}</td>
+      <td style="text-align:right">${(p.unit_price||0).toLocaleString()}원</td>
+      <td>${esc(p.notes||'')}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-sm btn-secondary" style="height:26px;padding:0 10px;font-size:11px" onclick="openProductEditModal(${p.id})">수정</button>
+        <button class="btn btn-sm btn-danger" style="height:26px;padding:0 10px;font-size:11px" onclick="confirmDeleteProduct(${p.id},'${esc(p.name).replace(/'/g,"\\'")}')">삭제</button>
+      </td>
+    </tr>`).join('')
+  : `<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--text-3)">등록된 제품이 없습니다</td></tr>`;
+
+  openModal('제품 관리', `
+    <div>
+      <div style="display:flex;justify-content:flex-end;margin-bottom:var(--s4)">
+        <button class="btn btn-primary" style="height:36px;font-size:13px" onclick="openProductEditModal(null)">+ 제품 추가</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="order-table">
+          <thead><tr><th>제품명</th><th style="text-align:right">단가</th><th>메모</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`);
+}
+
+function openProductEditModal(idOrNull) {
+  const p = typeof idOrNull === 'number'
+    ? (state.data.products || []).find(x => x.id === idOrNull) || {}
+    : {};
+  openModal(p.id ? '제품 수정' : '제품 추가', `
+    <form class="form" onsubmit="saveProduct(event)" data-id="${p.id||''}">
+      <div class="form-group">
+        <label class="form-label">제품명 <span class="req">*</span></label>
+        <input class="form-input" name="name" value="${esc(p.name||'')}" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">단가 (원)</label>
+        <input class="form-input" name="unit_price" type="number" value="${p.unit_price||0}" min="0">
+      </div>
+      <div class="form-group">
+        <label class="form-label">메모</label>
+        <input class="form-input" name="notes" value="${esc(p.notes||'')}">
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary btn-full">저장</button>
+        <button type="button" class="btn btn-secondary btn-full" onclick="openProductsModal()">취소</button>
+      </div>
+    </form>`);
+}
+
+async function saveProduct(event) {
+  event.preventDefault();
+  const form = event.target;
+  const fd = new FormData(form);
+  const body = {
+    name: fd.get('name').trim(),
+    unit_price: parseInt(fd.get('unit_price')) || 0,
+    notes: fd.get('notes').trim(),
+  };
+  const id = form.dataset.id;
+  if (id) await put(`/api/products/${id}`, body);
+  else await post('/api/products', body);
+  showToast(id ? '제품이 수정되었습니다' : '제품이 추가되었습니다');
+  const products = await get('/api/products');
+  state.config.products = products;
+  state.data.products = products;
+  renderProductsModal();
+}
+
+function confirmDeleteProduct(id, name) {
+  openModal('제품 삭제', `
+    <div class="confirm-body">
+      <div class="confirm-icon">🗑</div>
+      <div class="confirm-msg">'${esc(name)}' 제품을 삭제하시겠습니까?</div>
+      <button class="btn btn-danger btn-full" onclick="deleteProduct(${id})">삭제</button>
+      <div style="margin-top:12px"><button class="btn-ghost" onclick="openProductsModal()">취소</button></div>
+    </div>`);
+}
+
+async function deleteProduct(id) {
+  await del(`/api/products/${id}`);
+  showToast('삭제되었습니다');
+  const products = await get('/api/products');
+  state.config.products = products;
+  state.data.products = products;
+  renderProductsModal();
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────

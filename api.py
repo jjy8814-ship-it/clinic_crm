@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from db import DB, Account, Activity, Deal, Expense, Order, ACTIVITY_TYPES, ACTIVE_STAGES, STAGES, TIERS
+from db import DB, Account, Activity, Deal, Expense, Order, Product, ACTIVITY_TYPES, ACTIVE_STAGES, STAGES, TIERS
 
 ORDER_STATUSES = ["발주완료", "납품완료", "취소"]
 
@@ -46,6 +46,7 @@ class DealIn(BaseModel):
     next_action_date: str = ""
     notes: str = ""
     source: str = ""
+    source_detail: str = ""
 
 
 class ActivityIn(BaseModel):
@@ -71,6 +72,13 @@ class ExpenseIn(BaseModel):
     amount: int = 0
     month: str = ""
     notes: str = ""
+    category: str = "판관비"
+
+
+class ProductIn(BaseModel):
+    name: str
+    unit_price: int = 0
+    notes: str = ""
 
 
 COGS_PER_UNIT = 111_419
@@ -85,7 +93,8 @@ def index():
 
 @app.get("/api/config")
 def config():
-    return {"stages": _db.get_stages(), "tiers": TIERS, "activity_types": ACTIVITY_TYPES, "order_statuses": ORDER_STATUSES}
+    products = [dataclasses.asdict(p) for p in _db.get_products()]
+    return {"stages": _db.get_stages(), "tiers": TIERS, "activity_types": ACTIVITY_TYPES, "order_statuses": ORDER_STATUSES, "products": products}
 
 
 class StageRenameIn(BaseModel):
@@ -345,6 +354,8 @@ def get_pl():
         months[m]["units"]   += o.quantity
         months[m]["cogs"]    += o.quantity * COGS_PER_UNIT
 
+    # expenses_by_month stores list of expenses per month for detail view
+    expenses_by_month: dict = {}
     for e in expenses:
         m = (e.month or "")[:7]
         if not m:
@@ -352,20 +363,29 @@ def get_pl():
         if m not in months:
             months[m] = {"revenue": 0, "units": 0, "cogs": 0, "expenses": 0}
         months[m]["expenses"] += e.amount
+        if m not in expenses_by_month:
+            expenses_by_month[m] = []
+        expenses_by_month[m].append(dataclasses.asdict(e))
 
     rows = []
     for m in sorted(months.keys(), reverse=True):
         d = months[m]
         gross  = d["revenue"] - d["cogs"]
         operating = gross - d["expenses"]
+        # category breakdown
+        cat_totals: dict = {}
+        for exp in expenses_by_month.get(m, []):
+            cat = exp.get("category", "판관비") or "판관비"
+            cat_totals[cat] = cat_totals.get(cat, 0) + exp.get("amount", 0)
         rows.append({
-            "month":     m,
-            "revenue":   d["revenue"],
-            "units":     d["units"],
-            "cogs":      d["cogs"],
-            "expenses":  d["expenses"],
-            "gross":     gross,
-            "operating": operating,
+            "month":      m,
+            "revenue":    d["revenue"],
+            "units":      d["units"],
+            "cogs":       d["cogs"],
+            "expenses":   d["expenses"],
+            "gross":      gross,
+            "operating":  operating,
+            "cat_totals": cat_totals,
         })
 
     total_revenue   = sum(r["revenue"]   for r in rows)
@@ -373,6 +393,20 @@ def get_pl():
     total_expenses  = sum(r["expenses"]  for r in rows)
     total_gross     = total_revenue - total_cogs
     total_operating = total_gross - total_expenses
+
+    # build orders_by_month for detail
+    orders_by_month: dict = {}
+    for o in orders:
+        m = (o.order_date or "")[:7]
+        if not m:
+            continue
+        if m not in orders_by_month:
+            orders_by_month[m] = []
+        acct = _db.get_account(o.account_id) if o.account_id else None
+        row = dataclasses.asdict(o)
+        row["account_name"] = acct.name if acct else None
+        row["total_price"] = o.quantity * o.unit_price
+        orders_by_month[m].append(row)
 
     return {
         "rows": rows,
@@ -384,7 +418,36 @@ def get_pl():
             "operating": total_operating,
         },
         "cogs_per_unit": COGS_PER_UNIT,
+        "expenses_detail": expenses_by_month,
+        "orders_detail":   orders_by_month,
     }
+
+
+# ── Products ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/products")
+def list_products():
+    return [dataclasses.asdict(p) for p in _db.get_products()]
+
+
+@app.post("/api/products", status_code=201)
+def create_product(body: ProductIn):
+    p = Product(**body.model_dump())
+    p.id = _db.upsert_product(p)
+    return dataclasses.asdict(p)
+
+
+@app.put("/api/products/{pid}")
+def update_product(pid: int, body: ProductIn):
+    p = Product(id=pid, **body.model_dump())
+    _db.upsert_product(p)
+    return dataclasses.asdict(p)
+
+
+@app.delete("/api/products/{pid}")
+def delete_product(pid: int):
+    _db.delete_product(pid)
+    return {"ok": True}
 
 
 # ── CSV Import ─────────────────────────────────────────────────────────────────

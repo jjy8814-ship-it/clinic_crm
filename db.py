@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS deals (
     next_action      TEXT    DEFAULT '',
     next_action_date TEXT    DEFAULT '',
     notes            TEXT    DEFAULT '',
-    created_at       TEXT    DEFAULT (date('now','localtime'))
+    created_at       TEXT    DEFAULT (date('now','localtime')),
+    source           TEXT    DEFAULT '',
+    source_detail    TEXT    DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS activities (
@@ -67,11 +69,19 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 
 CREATE TABLE IF NOT EXISTS expenses (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    name    TEXT    NOT NULL,
-    amount  INTEGER DEFAULT 0,
-    month   TEXT    DEFAULT '',
-    notes   TEXT    DEFAULT ''
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    name     TEXT    NOT NULL,
+    amount   INTEGER DEFAULT 0,
+    month    TEXT    DEFAULT '',
+    notes    TEXT    DEFAULT '',
+    category TEXT    DEFAULT '판관비'
+);
+
+CREATE TABLE IF NOT EXISTS products (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL UNIQUE,
+    unit_price INTEGER DEFAULT 0,
+    notes      TEXT    DEFAULT ''
 );
 """
 
@@ -100,6 +110,7 @@ class Deal:
     notes: str = ""
     created_at: str = ""
     source: str = ""
+    source_detail: str = ""
 
 
 @dataclass
@@ -131,6 +142,15 @@ class Expense:
     amount: int = 0
     month: str = ""
     notes: str = ""
+    category: str = "판관비"
+
+
+@dataclass
+class Product:
+    id: Optional[int] = None
+    name: str = ""
+    unit_price: int = 0
+    notes: str = ""
 
 
 class DB:
@@ -148,6 +168,16 @@ class DB:
                 pass
         try:
             self._c.execute("ALTER TABLE deals ADD COLUMN source TEXT DEFAULT ''")
+            self._c.commit()
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self._c.execute("ALTER TABLE deals ADD COLUMN source_detail TEXT DEFAULT ''")
+            self._c.commit()
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self._c.execute("ALTER TABLE expenses ADD COLUMN category TEXT DEFAULT '판관비'")
             self._c.commit()
         except sqlite3.OperationalError:
             pass
@@ -260,14 +290,14 @@ class DB:
     def upsert_deal(self, d: Deal) -> int:
         if d.id:
             self._c.execute(
-                "UPDATE deals SET title=?,account_id=?,stage=?,value=?,next_action=?,next_action_date=?,notes=?,source=? WHERE id=?",
-                (d.title, d.account_id, d.stage, d.value, d.next_action, d.next_action_date, d.notes, d.source, d.id),
+                "UPDATE deals SET title=?,account_id=?,stage=?,value=?,next_action=?,next_action_date=?,notes=?,source=?,source_detail=? WHERE id=?",
+                (d.title, d.account_id, d.stage, d.value, d.next_action, d.next_action_date, d.notes, d.source, d.source_detail, d.id),
             )
             self._c.commit()
             return d.id
         cur = self._c.execute(
-            "INSERT INTO deals (title,account_id,stage,value,next_action,next_action_date,notes,source) VALUES (?,?,?,?,?,?,?,?)",
-            (d.title, d.account_id, d.stage, d.value, d.next_action, d.next_action_date, d.notes, d.source),
+            "INSERT INTO deals (title,account_id,stage,value,next_action,next_action_date,notes,source,source_detail) VALUES (?,?,?,?,?,?,?,?,?)",
+            (d.title, d.account_id, d.stage, d.value, d.next_action, d.next_action_date, d.notes, d.source, d.source_detail),
         )
         self._c.commit()
         return cur.lastrowid
@@ -376,14 +406,14 @@ class DB:
     def upsert_expense(self, e: Expense) -> int:
         if e.id:
             self._c.execute(
-                "UPDATE expenses SET name=?,amount=?,month=?,notes=? WHERE id=?",
-                (e.name, e.amount, e.month, e.notes, e.id),
+                "UPDATE expenses SET name=?,amount=?,month=?,notes=?,category=? WHERE id=?",
+                (e.name, e.amount, e.month, e.notes, e.category, e.id),
             )
             self._c.commit()
             return e.id
         cur = self._c.execute(
-            "INSERT INTO expenses (name,amount,month,notes) VALUES (?,?,?,?)",
-            (e.name, e.amount, e.month, e.notes),
+            "INSERT INTO expenses (name,amount,month,notes,category) VALUES (?,?,?,?,?)",
+            (e.name, e.amount, e.month, e.notes, e.category),
         )
         self._c.commit()
         return cur.lastrowid
@@ -394,6 +424,35 @@ class DB:
 
     def delete_expense(self, eid: int) -> None:
         self._c.execute("DELETE FROM expenses WHERE id=?", (eid,))
+        self._c.commit()
+
+    # ── Products ──────────────────────────────────────────────────────────────
+
+    def upsert_product(self, p: Product) -> int:
+        if p.id:
+            self._c.execute(
+                "UPDATE products SET name=?,unit_price=?,notes=? WHERE id=?",
+                (p.name, p.unit_price, p.notes, p.id),
+            )
+            self._c.commit()
+            return p.id
+        cur = self._c.execute(
+            "INSERT INTO products (name,unit_price,notes) VALUES (?,?,?)",
+            (p.name, p.unit_price, p.notes),
+        )
+        self._c.commit()
+        return cur.lastrowid
+
+    def get_products(self) -> List[Product]:
+        rows = self._c.execute("SELECT * FROM products ORDER BY name")
+        return [Product(**dict(r)) for r in rows]
+
+    def get_product(self, pid: int) -> Optional[Product]:
+        r = self._c.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+        return Product(**dict(r)) if r else None
+
+    def delete_product(self, pid: int) -> None:
+        self._c.execute("DELETE FROM products WHERE id=?", (pid,))
         self._c.commit()
 
     def close(self) -> None:
