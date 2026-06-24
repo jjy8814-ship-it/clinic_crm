@@ -1051,7 +1051,8 @@ input, select, textarea { font-family: inherit; }
   position: fixed;
   top: 0;
   right: 0;
-  width: 420px;
+  width: 33vw;
+  min-width: 380px;
   height: 100vh;
   background: var(--bg-card);
   border-left: 1px solid var(--border);

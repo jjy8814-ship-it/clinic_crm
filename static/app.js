@@ -331,7 +331,6 @@ function tplPipeline(deals) {
             <span style="font-size:12px;color:#8B95A1;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.next_action ? esc(d.next_action) : '<span style="color:#D1D5DB">다음 액션 없음</span>'}</span>
             ${dateTxt ? `<span class="deal-date ${dateCls}" style="flex-shrink:0;font-size:12px">${dateTxt}</span>` : ''}
             <div class="kcard-btns" onclick="event.stopPropagation()">
-              <button class="btn btn-sm btn-secondary" style="height:26px;padding:0 10px;font-size:11px" onclick="openSidePanel(${d.id})">패널</button>
               <button class="btn btn-sm btn-secondary" style="height:26px;padding:0 10px;font-size:11px" onclick="openActivityModal(${d.id},'${titleEsc}')">활동</button>
               <button class="btn btn-sm btn-danger" style="height:26px;padding:0 10px;font-size:11px" onclick="confirmDeleteDeal(${d.id},'${titleEsc}')">삭제</button>
             </div>
@@ -964,6 +963,7 @@ function openDealModal(dealOrNull) {
       </div>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary btn-full">저장</button>
+        ${d.id ? `<button type="button" class="btn btn-secondary btn-full" onclick="closeModal();openSidePanel(${d.id})">↗ 사이드뷰로 보기</button>` : ''}
         <button type="button" class="btn btn-secondary btn-full" onclick="closeModal()">취소</button>
       </div>
     </form>`);
