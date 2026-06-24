@@ -45,6 +45,7 @@ class DealIn(BaseModel):
     next_action: str = ""
     next_action_date: str = ""
     notes: str = ""
+    source: str = ""
 
 
 class ActivityIn(BaseModel):
@@ -236,8 +237,10 @@ def list_activities(deal_id: Optional[int] = None):
     result = []
     for a in _db.get_activities(deal_id=deal_id):
         deal = _db.get_deal(a.deal_id) if a.deal_id else None
+        acct = _db.get_account(deal.account_id) if deal and deal.account_id else None
         row = dataclasses.asdict(a)
         row["deal_title"] = deal.title if deal else None
+        row["account_name"] = acct.name if acct else None
         result.append(row)
     return result
 

@@ -41,6 +41,13 @@ async function navigate(page) {
         get('/api/orders'), get('/api/accounts'),
       ]);
       state.orderAccountFilter = 'all';
+    } else if (page === 'activities') {
+      state.data.activities = await get('/api/activities');
+      state.activityTypeFilter = 'all';
+    } else if (page === 'pl') {
+      [state.data.pl, state.data.expenses] = await Promise.all([
+        get('/api/pl'), get('/api/expenses'),
+      ]);
     }
     render();
   } catch (e) {
@@ -66,10 +73,12 @@ function render() {
     if (main) main.style.overflow = 'hidden';
   }
   switch (state.page) {
-    case 'dashboard':  app.innerHTML = tplDashboard(state.data.dashboard); break;
-    case 'pipeline':   app.innerHTML = tplPipeline(state.data.deals); break;
-    case 'contacts':   app.innerHTML = tplContacts(state.accounts); break;
-    case 'orders':     app.innerHTML = tplOrders(state.data.orders); break;
+    case 'dashboard':   app.innerHTML = tplDashboard(state.data.dashboard); break;
+    case 'pipeline':    app.innerHTML = tplPipeline(state.data.deals); break;
+    case 'contacts':    app.innerHTML = tplContacts(state.accounts); break;
+    case 'orders':      app.innerHTML = tplOrders(state.data.orders); break;
+    case 'activities':  app.innerHTML = tplActivities(state.data.activities); break;
+    case 'pl':          app.innerHTML = tplPL(state.data.pl, state.data.expenses); break;
   }
 }
 
@@ -229,7 +238,7 @@ async function dropCard(event, stage) {
 function dealBody(d) {
   return { title: d.title, account_id: d.account_id, stage: d.stage,
     value: d.value, next_action: d.next_action,
-    next_action_date: d.next_action_date, notes: d.notes };
+    next_action_date: d.next_action_date, notes: d.notes, source: d.source || '' };
 }
 function openDealModalInStage(stage) { openDealModal({ stage }); }
 
@@ -264,9 +273,9 @@ async function saveStageRename(oldName) {
     state.config.stages = data.stages;
     (state.data.deals || []).forEach(d => { if (d.stage === oldName) d.stage = newName; });
     closeModal();
-    toast(`"${newName}"으로 변경되었습니다.`);
+    showToast(`"${newName}"으로 변경되었습니다.`);
     render();
-  } catch(e) { toast('저장 실패: ' + e.message, 'error'); }
+  } catch(e) { showToast('저장 실패: ' + e.message, 'error'); }
 }
 
 function tplPipeline(deals) {
@@ -312,6 +321,7 @@ function tplPipeline(deals) {
             </div>
           </div>
           ${d.value ? `<div style="font-size:15px;font-weight:700;color:#191F28;margin-bottom:8px;letter-spacing:-0.3px">${fmtVal(d.value)}</div>` : ''}
+          ${d.source ? `<div style="margin-bottom:6px"><span style="font-size:10px;font-weight:600;color:#8B95A1;background:#F2F4F6;border-radius:4px;padding:1px 6px">${esc(d.source)}</span></div>` : ''}
           <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding-top:8px;border-top:1px solid #F0F1F3">
             <span style="font-size:12px;color:#8B95A1;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.next_action ? esc(d.next_action) : '<span style="color:#D1D5DB">다음 액션 없음</span>'}</span>
             ${dateTxt ? `<span class="deal-date ${dateCls}" style="flex-shrink:0;font-size:12px">${dateTxt}</span>` : ''}
@@ -400,6 +410,80 @@ function tplContacts(accounts) {
       </div>
     </div>
     <div class="account-grid">${cards}</div>`;
+}
+
+// ── Activities ─────────────────────────────────────────────────────────────────
+
+function tplActivities(activities) {
+  const all = activities || [];
+  const filter = state.activityTypeFilter || 'all';
+  const types = state.config.activity_types || [];
+
+  const typePills = [['all', `전체 (${all.length}건)`],
+    ...types.map(t => [t, `${t} (${all.filter(a => a.type === t).length}건)`])
+  ].map(([id, label]) =>
+    `<button class="filter-tab ${filter === id ? 'active' : ''}" onclick="setActivityTypeFilter('${id}')">${label}</button>`
+  ).join('');
+
+  const filtered = filter === 'all' ? all : all.filter(a => a.type === filter);
+
+  const typeColor = { '통화': '#1B64DA', '미팅': '#00B140', '이메일': '#7B61FF', '문자': '#FF6D00', '기타': '#8B95A1' };
+  const typeBadge = t => `<span style="font-size:11px;font-weight:600;color:#fff;background:${typeColor[t]||'#8B95A1'};border-radius:20px;padding:2px 9px">${t}</span>`;
+
+  const rows = filtered.length
+    ? filtered.map(a => `
+        <tr onclick="openActivityDetail(${a.id})" style="cursor:pointer" title="클릭하면 전체 내용을 볼 수 있습니다">
+          <td style="color:#4E5968;font-size:13px;white-space:nowrap">${a.date || '—'}</td>
+          <td>${typeBadge(a.type)}</td>
+          <td style="font-weight:500;color:#191F28">${esc(a.deal_title || a.account_name || '—')}</td>
+          <td style="color:#4E5968;max-width:340px">
+            <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((a.notes || '').slice(0, 100))}${(a.notes||'').length > 100 ? '…' : ''}</div>
+          </td>
+        </tr>`)
+      .join('')
+    : `<tr><td colspan="4" style="text-align:center;padding:48px;color:var(--text-3)">활동 기록이 없습니다</td></tr>`;
+
+  return `
+    <div class="page-header-row">
+      <h1 class="page-title">활동 로그</h1>
+    </div>
+    <div class="filter-tabs" style="margin-bottom:var(--s4)">${typePills}</div>
+    <div class="card" style="overflow-x:auto">
+      <table class="order-table">
+        <thead>
+          <tr>
+            <th style="width:110px">날짜</th>
+            <th style="width:76px">유형</th>
+            <th style="width:200px">병원 / 딜</th>
+            <th>내용 <span style="font-size:11px;font-weight:400;color:#B0B8C1">(클릭하면 전체 내용)</span></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function setActivityTypeFilter(type) {
+  state.activityTypeFilter = type;
+  render();
+}
+
+function openActivityDetail(id) {
+  const a = (state.data.activities || []).find(x => x.id === id);
+  if (!a) return;
+  const typeColor = { '통화': '#1B64DA', '미팅': '#00B140', '이메일': '#7B61FF', '문자': '#FF6D00', '기타': '#8B95A1' };
+  openModal('활동 상세', `
+    <div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:var(--s4)">
+        <span style="font-size:12px;font-weight:600;color:#fff;background:${typeColor[a.type]||'#8B95A1'};border-radius:20px;padding:3px 10px">${esc(a.type)}</span>
+        <span style="font-size:13px;color:var(--text-3)">${esc(a.date || '날짜 없음')}</span>
+      </div>
+      ${a.deal_title ? `<div style="font-size:15px;font-weight:600;color:var(--text-1);margin-bottom:var(--s4)">${esc(a.deal_title)}</div>` : ''}
+      <div style="white-space:pre-wrap;font-size:14px;color:var(--text-2);line-height:1.75;background:var(--gray-100);border-radius:var(--r-md);padding:var(--s4);min-height:80px">${esc(a.notes || '(내용 없음)')}</div>
+      <div style="display:flex;justify-content:flex-end;margin-top:var(--s5)">
+        <button class="btn btn-secondary" onclick="closeModal()">닫기</button>
+      </div>
+    </div>`);
 }
 
 // ── P&L ───────────────────────────────────────────────────────────────────────
@@ -578,6 +662,19 @@ function tplOrders(orders) {
     return `<span class="badge ${cls}">${s}</span>`;
   };
 
+  const FREE_RETURN_DAYS = 60;
+  const returnBadge = o => {
+    if (!o.delivery_date || o.status !== '납품완료') return '<span style="color:#D1D5DB;font-size:12px">—</span>';
+    const today = new Date(); today.setHours(0,0,0,0);
+    const delivery = new Date(o.delivery_date + 'T00:00:00'); delivery.setHours(0,0,0,0);
+    const daysSince = Math.floor((today - delivery) / 86400000);
+    const remaining = FREE_RETURN_DAYS - daysSince;
+    if (remaining > 7)  return `<span style="font-size:12px;font-weight:600;color:#00B140">D-${remaining}</span>`;
+    if (remaining > 0)  return `<span style="font-size:12px;font-weight:700;color:#FF6D00">D-${remaining}</span>`;
+    if (remaining === 0) return `<span style="font-size:12px;font-weight:700;color:#F04452">D-0</span>`;
+    return `<span style="font-size:12px;color:#B0B8C1">만료</span>`;
+  };
+
   const rows = filtered.length
     ? filtered.map(o => `
         <tr onclick="openOrderModal(${o.id})" style="cursor:pointer">
@@ -589,13 +686,14 @@ function tplOrders(orders) {
           <td>${o.order_date || '—'}</td>
           <td>${o.delivery_date || '—'}</td>
           <td>${statusBadge(o.status)}</td>
+          <td style="text-align:center">${returnBadge(o)}</td>
           <td onclick="event.stopPropagation()" style="white-space:nowrap">
             <button class="btn btn-sm btn-secondary" onclick="printOrderPDF(${o.id})">발주서</button>
             <button class="btn btn-sm btn-danger" onclick="confirmDeleteOrder(${o.id},'${esc(o.account_name||'').replace(/'/g,"\\'")}')">삭제</button>
           </td>
         </tr>`)
       .join('')
-    : `<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text-3)">발주 내역이 없습니다</td></tr>`;
+    : `<tr><td colspan="10" style="text-align:center;padding:40px;color:var(--text-3)">발주 내역이 없습니다</td></tr>`;
 
   return `
     <div class="page-header-row">
@@ -623,7 +721,9 @@ function tplOrders(orders) {
           <tr>
             <th>병원명</th><th>제품명</th><th style="text-align:center">수량</th>
             <th style="text-align:right">단가</th><th style="text-align:right">합계</th>
-            <th>발주일</th><th>납품일</th><th>상태</th><th></th>
+            <th>발주일</th><th>납품일</th><th>상태</th>
+            <th style="text-align:center" title="납품 후 60일 이내 무료 반품">반품 가능</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>${rows}</tbody>
@@ -699,6 +799,20 @@ function openDealModal(dealOrNull) {
       <div class="form-group">
         <label class="form-label">다음 액션 날짜</label>
         <input class="form-input" name="next_action_date" type="date" value="${d.next_action_date||''}">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">리드 출처</label>
+          <select class="form-select" name="source">
+            <option value="" ${!d.source ? 'selected' : ''}>미지정</option>
+            <option value="아웃바운드" ${d.source === '아웃바운드' ? 'selected' : ''}>아웃바운드</option>
+            <option value="인바운드" ${d.source === '인바운드' ? 'selected' : ''}>인바운드</option>
+            <option value="부스/행사" ${d.source === '부스/행사' ? 'selected' : ''}>부스/행사</option>
+            <option value="소개/레퍼럴" ${d.source === '소개/레퍼럴' ? 'selected' : ''}>소개/레퍼럴</option>
+            <option value="기타" ${d.source === '기타' ? 'selected' : ''}>기타</option>
+          </select>
+        </div>
+        <div class="form-group" style="visibility:hidden"></div>
       </div>
       <div class="form-group">
         <label class="form-label">메모</label>
@@ -1230,13 +1344,14 @@ async function saveDeal(event) {
   }
 
   const body = {
-    title:            hospitalName,   // 병원명 = 딜 제목
+    title:            hospitalName,
     account_id,
     stage:            fd.get('stage') || '제안 완료',
     value:            parseInt(fd.get('value')) || 0,
     next_action:      (fd.get('next_action')      || '').trim(),
     next_action_date: fd.get('next_action_date')  || '',
     notes:            (fd.get('notes')            || '').trim(),
+    source:           (fd.get('source')           || '').trim(),
   };
   const id = form.dataset.id;
   await (id ? put(`/api/deals/${id}`, body) : post('/api/deals', body));

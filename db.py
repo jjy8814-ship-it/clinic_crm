@@ -99,6 +99,7 @@ class Deal:
     next_action_date: str = ""
     notes: str = ""
     created_at: str = ""
+    source: str = ""
 
 
 @dataclass
@@ -145,6 +146,11 @@ class DB:
                 self._c.commit()
             except sqlite3.OperationalError:
                 pass
+        try:
+            self._c.execute("ALTER TABLE deals ADD COLUMN source TEXT DEFAULT ''")
+            self._c.commit()
+        except sqlite3.OperationalError:
+            pass
         # Migrate: remap old stage names to new kanban stages
         _stage_map = [
             ("리드",    "제안 완료"),
@@ -254,14 +260,14 @@ class DB:
     def upsert_deal(self, d: Deal) -> int:
         if d.id:
             self._c.execute(
-                "UPDATE deals SET title=?,account_id=?,stage=?,value=?,next_action=?,next_action_date=?,notes=? WHERE id=?",
-                (d.title, d.account_id, d.stage, d.value, d.next_action, d.next_action_date, d.notes, d.id),
+                "UPDATE deals SET title=?,account_id=?,stage=?,value=?,next_action=?,next_action_date=?,notes=?,source=? WHERE id=?",
+                (d.title, d.account_id, d.stage, d.value, d.next_action, d.next_action_date, d.notes, d.source, d.id),
             )
             self._c.commit()
             return d.id
         cur = self._c.execute(
-            "INSERT INTO deals (title,account_id,stage,value,next_action,next_action_date,notes) VALUES (?,?,?,?,?,?,?)",
-            (d.title, d.account_id, d.stage, d.value, d.next_action, d.next_action_date, d.notes),
+            "INSERT INTO deals (title,account_id,stage,value,next_action,next_action_date,notes,source) VALUES (?,?,?,?,?,?,?,?)",
+            (d.title, d.account_id, d.stage, d.value, d.next_action, d.next_action_date, d.notes, d.source),
         )
         self._c.commit()
         return cur.lastrowid
