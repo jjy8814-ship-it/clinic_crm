@@ -486,6 +486,7 @@ function openActivityDetail(id) {
     </div>`);
 }
 
+
 // ── P&L ───────────────────────────────────────────────────────────────────────
 
 function tplPL(pl, expenses) {
