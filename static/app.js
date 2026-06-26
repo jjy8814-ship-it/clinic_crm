@@ -915,7 +915,9 @@ function openDealModal(dealOrNull) {
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">연락처</label>
-          <input class="form-input" name="phone" value="${esc(phone)}" placeholder="010-1234-5678">
+          <input class="form-input" name="phone" id="deal-phone-input" value="${esc(phone)}" placeholder="010-1234-5678"
+            oninput="checkPhoneDuplicate(this, ${d.id || 'null'})">
+          <div id="phone-dup-msg" style="display:none;font-size:12px;color:var(--red-500);margin-top:4px"></div>
         </div>
         <div class="form-group">
           <label class="form-label">이메일</label>
@@ -1305,21 +1307,40 @@ function printOrderPDF(id) {
 // ── CSV Import modal ───────────────────────────────────────────────────────────
 
 function openImportModal(type) {
-  const label = type === 'deals' ? '리드/딜' : '거래처';
+  const label = type === 'deals' ? '리드' : '거래처';
   const endpoint = type === 'deals' ? '/api/import/deals' : '/api/import/accounts';
 
-  const templateCols = type === 'deals'
-    ? '병원명,고객명,이메일,전화번호'
-    : '거래처 이름,분류,고객명,이메일,전화번호,주소,메모';
-  const templateEx = type === 'deals'
-    ? '강남스킨케어의원,홍길동,hong@skinclinic.com,02-1234-5678'
-    : '강남스킨케어의원,개인의원,홍길동,hong@skinclinic.com,02-1234-5678,서울시 강남구,';
+  const dealsRequired = '병원명,이름,전화번호,이메일';
+  const dealsOptional = '단계,리드 이름,금액(원),다음 액션,날짜(YYYY-MM-DD),메모,분류,주소,거래처 메모';
+  const dealsCols = dealsRequired + ',' + dealsOptional;
+  const dealsEx = '강남스킨케어의원,홍길동,02-1234-5678,hong@skinclinic.com,제안 완료,강남스킨케어의원 리드,,첫 미팅 제안,,개인의원,,';
+
+  const accountsCols = '거래처 이름,분류,고객명,이메일,전화번호,주소,메모';
+  const accountsEx = '강남스킨케어의원,개인의원,홍길동,hong@skinclinic.com,02-1234-5678,서울시 강남구,';
+
+  const templateCols = type === 'deals' ? dealsCols : accountsCols;
+  const templateEx   = type === 'deals' ? dealsEx   : accountsEx;
+
+  const stagesHint = type === 'deals'
+    ? `<div style="font-size:12px;color:var(--text-3);margin-top:6px">
+        <b>단계 값:</b> 제안 완료 / 미팅 확정 / 계약 대기중 / 계약완료 / Lost<br>
+        <span style="color:var(--text-4)">(비워두면 "제안 완료"로 자동 설정)</span>
+       </div>`
+    : `<div style="font-size:12px;color:var(--text-3);margin-top:6px">
+        <b>분류 값:</b> 개인의원 / 네트워크 / 대형병원
+       </div>`;
+
+  const requiredNote = type === 'deals'
+    ? `<div style="font-size:12px;color:var(--red-500);margin-top:6px"><b>필수:</b> 병원명, 이름, 전화번호, 이메일</div>`
+    : '';
 
   openModal(`${label} CSV 가져오기`, `
     <div class="form">
       <div style="background:var(--blue-50);border-radius:var(--r-md);padding:var(--s4)">
         <div style="font-size:13px;font-weight:600;color:var(--blue-500);margin-bottom:6px">CSV 파일 형식</div>
         <div style="font-size:12px;color:var(--text-2);font-family:monospace;word-break:break-all">${templateCols}</div>
+        ${requiredNote}
+        ${stagesHint}
       </div>
       <div style="display:flex;justify-content:flex-end">
         <button class="btn-ghost" onclick="downloadTemplate('${type}','${templateCols}','${templateEx}')">📥 템플릿 다운로드</button>
@@ -1363,64 +1384,99 @@ async function handleImport(endpoint) {
     }
 
     const result = await r.json();
-    const errCount = result.errors?.length || 0;
-
-    if (result.imported === 0) {
-      // Nothing went in — show failure clearly
-      const colInfo = result.columns?.length
-        ? `<div style="font-size:12px;color:var(--text-3);margin-top:6px">파일에서 읽은 열: <code style="background:var(--gray-100);padding:1px 4px;border-radius:3px">${esc(result.columns.join(', '))}</code></div>`
-        : '<div style="font-size:12px;color:var(--text-3);margin-top:4px">파일이 비어 있거나 헤더를 읽지 못했습니다.</div>';
-      const errList = errCount
-        ? `<div style="margin-top:8px;font-size:12px;color:var(--red-500);background:#FFF0F0;border-radius:6px;padding:8px;max-height:150px;overflow-y:auto">${result.errors.map(esc).join('<br>')}</div>`
-        : '';
-      resultEl.innerHTML = `<div style="background:#FFF0F0;border-radius:var(--r-md);padding:var(--s3) var(--s4)">
-        <div style="font-size:14px;font-weight:600;color:var(--red-500)">✕ 가져오기 실패 — 저장된 항목이 없습니다</div>
-        ${colInfo}
-        ${errList || '<div style="font-size:12px;color:var(--text-3);margin-top:4px">열 이름이 템플릿과 다르거나 파일에 내용이 없습니다.</div>'}
-      </div>`;
-      return;
-    }
-
-    // Some or all imported successfully
-    const errHtml = errCount
-      ? `<div style="margin-top:8px">
-           <div style="font-size:12px;font-weight:600;color:#E65100;margin-bottom:4px">실패 항목 (${errCount}건):</div>
-           <div style="font-size:12px;color:#E65100;background:#FFF3E0;border-radius:6px;padding:8px;max-height:150px;overflow-y:auto">${result.errors.map(esc).join('<br>')}</div>
-         </div>`
-      : '';
-    const bg = errCount ? '#FFF8E1' : 'var(--green-50)';
-    const fg = errCount ? '#E65100' : 'var(--green-500)';
-    const icon = errCount ? '⚠' : '✓';
-    const msg = errCount
-      ? `${result.imported}건 완료, ${errCount}건 실패`
-      : `${result.imported}건 가져오기 완료`;
-
-    resultEl.innerHTML = `<div style="background:${bg};border-radius:var(--r-md);padding:var(--s3) var(--s4)">
-      <div style="font-size:14px;font-weight:600;color:${fg}">${icon} ${esc(msg)}</div>
-      ${errHtml}
-    </div>`;
-
-    showToast(`${result.imported}건 가져오기 완료`);
+    closeModal();
     state.accounts = await get('/api/accounts');
-
-    if (!errCount) {
-      // Full success — close modal and refresh
-      setTimeout(async () => {
-        closeModal();
-        await navigate(state.page);
-      }, 700);
-    } else {
-      // Partial — refresh data behind the modal
-      if (state.page === 'pipeline') {
-        state.data.deals = await get('/api/deals');
-        render();
-      } else if (state.page === 'contacts') {
-        render();
-      }
-    }
+    await navigate(state.page);
+    showImportResultPanel(result);
   } catch (e) {
     resultEl.innerHTML = `<div style="background:#FFF0F0;border-radius:var(--r-md);padding:var(--s3) var(--s4);color:var(--red-500);font-size:13px">오류: ${esc(e.message)}</div>`;
   }
+}
+
+function showImportResultPanel(result) {
+  const panel = document.getElementById('import-result-panel');
+  if (!panel) return;
+
+  const imported = result.imported || 0;
+  const duplicates = result.duplicates || 0;
+  const errors = result.errors || [];
+  const otherErrors = errors.filter(e => !e.includes('중복 리드'));
+  const totalFail = errors.length;
+
+  const isSuccess = imported > 0 && totalFail === 0;
+  const headerBg = isSuccess ? '#EDF7ED' : imported > 0 ? '#FFF8E1' : '#FFF0F0';
+  const headerColor = isSuccess ? '#2E7D32' : imported > 0 ? '#E65100' : '#C62828';
+  const icon = isSuccess ? '✓' : imported > 0 ? '⚠' : '✕';
+
+  let bodyHtml = `
+    <div style="display:flex;gap:16px;padding:14px 16px;border-bottom:1px solid #F0F0F0">
+      <div style="flex:1;text-align:center">
+        <div style="font-size:11px;color:#888;margin-bottom:2px">성공</div>
+        <div style="font-size:22px;font-weight:700;color:#2E7D32">${imported}<span style="font-size:13px;font-weight:400">건</span></div>
+      </div>
+      <div style="width:1px;background:#F0F0F0"></div>
+      <div style="flex:1;text-align:center">
+        <div style="font-size:11px;color:#888;margin-bottom:2px">실패</div>
+        <div style="font-size:22px;font-weight:700;color:${totalFail ? '#C62828' : '#9E9E9E'}">${totalFail}<span style="font-size:13px;font-weight:400">건</span></div>
+      </div>
+    </div>`;
+
+  if (duplicates > 0) {
+    bodyHtml += `
+    <div style="padding:10px 16px;border-bottom:1px solid #F0F0F0;font-size:13px;color:#C62828">
+      실패 이유: <strong>중복 리드 ${duplicates}건</strong>
+    </div>`;
+  }
+
+  if (otherErrors.length > 0) {
+    bodyHtml += `
+    <div style="padding:10px 16px;border-bottom:1px solid #F0F0F0">
+      <div style="font-size:12px;font-weight:600;color:#555;margin-bottom:6px">기타 오류 (${otherErrors.length}건)</div>
+      <div style="font-size:12px;color:#C62828;max-height:130px;overflow-y:auto;line-height:1.7">${otherErrors.map(esc).join('<br>')}</div>
+    </div>`;
+  }
+
+  if (imported === 0 && result.columns?.length) {
+    bodyHtml += `
+    <div style="padding:10px 16px;font-size:12px;color:#888">
+      파일에서 읽은 열: <code style="background:#F5F5F5;padding:1px 4px;border-radius:3px">${esc(result.columns.join(', '))}</code>
+    </div>`;
+  }
+
+  panel.innerHTML = `
+    <div style="background:${headerBg};padding:12px 16px;display:flex;align-items:center;justify-content:space-between">
+      <div style="font-size:14px;font-weight:700;color:${headerColor}">${icon} CSV 가져오기 결과</div>
+      <button onclick="document.getElementById('import-result-panel').style.display='none'"
+        style="background:none;border:none;cursor:pointer;padding:4px;color:#888;line-height:1;font-size:18px">✕</button>
+    </div>
+    ${bodyHtml}`;
+
+  panel.style.display = 'block';
+}
+
+let _phoneDupTimer = null;
+async function checkPhoneDuplicate(input, currentDealId) {
+  clearTimeout(_phoneDupTimer);
+  const msg = document.getElementById('phone-dup-msg');
+  if (!msg) return;
+  const phone = input.value.trim();
+  if (!phone) { msg.style.display = 'none'; return; }
+  _phoneDupTimer = setTimeout(async () => {
+    try {
+      const res = await get(`/api/check-phone?phone=${encodeURIComponent(phone)}`);
+      if (res.exists) {
+        const sameAcct = currentDealId
+          ? (state.data.deals || []).find(d => d.id === currentDealId)?.account_id === res.account?.id
+          : false;
+        if (!sameAcct) {
+          msg.textContent = `이미 등록된 거래처입니다 — ${res.account?.name || ''}`;
+          msg.style.display = 'block';
+          return;
+        }
+      }
+      msg.style.display = 'none';
+    } catch (_) { msg.style.display = 'none'; }
+  }, 400);
 }
 
 function downloadTemplate(type, cols, example) {

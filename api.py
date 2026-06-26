@@ -171,6 +171,17 @@ def list_accounts():
     return result
 
 
+@app.get("/api/check-phone")
+def check_phone(phone: str = ""):
+    phone = phone.strip()
+    if not phone:
+        return {"exists": False, "account": None}
+    for a in _db.get_accounts():
+        if a.phone and a.phone.strip() == phone:
+            return {"exists": True, "account": {"id": a.id, "name": a.name}}
+    return {"exists": False, "account": None}
+
+
 @app.post("/api/accounts", status_code=201)
 def create_account(body: AccountIn):
     a = Account(**body.model_dump())
@@ -466,8 +477,12 @@ async def import_deals(file: UploadFile = File(...)):
     text = _decode(await file.read())
     reader = csv.DictReader(io.StringIO(text))
     imported, errors = 0, []
+    duplicates = 0
     all_accounts = {a.name: a for a in _db.get_accounts()}
-    valid_stages = set(_db.get_stages())
+    phone_to_account = {a.phone.strip(): a for a in all_accounts.values() if a.phone and a.phone.strip()}
+    stages = _db.get_stages()
+    valid_stages = set(stages)
+    default_stage = stages[0] if stages else "제안 완료"
     columns: list = []
 
     for i, row in enumerate(reader, start=2):
@@ -480,36 +495,65 @@ async def import_deals(file: UploadFile = File(...)):
                 errors.append(f"{i}행: '병원명' 값 없음")
                 continue
 
-            contact_name = (r.get("고객명") or r.get("담당자") or "").strip()
-            email = (r.get("이메일") or r.get("email") or "").strip()
-            phone = (r.get("전화번호") or r.get("phone") or "").strip()
+            contact_name = (r.get("이름") or r.get("고객명") or r.get("담당자") or "").strip()
+            if not contact_name:
+                errors.append(f"{i}행: '이름' 값 없음")
+                continue
 
-            # Upsert account with contact info
+            phone = (r.get("전화번호") or r.get("phone") or "").strip()
+            if not phone:
+                errors.append(f"{i}행: '전화번호' 값 없음")
+                continue
+
+            email = (r.get("이메일") or r.get("email") or "").strip()
+            if not email:
+                errors.append(f"{i}행: '이메일' 값 없음")
+                continue
+
+            # Phone-based duplicate check
+            if phone in phone_to_account:
+                existing_acct = phone_to_account[phone]
+                if existing_acct.name != hospital:
+                    errors.append(f"{i}행: 중복 리드 (전화번호 {phone} → 이미 등록된 거래처 '{existing_acct.name}')")
+                    duplicates += 1
+                    continue
+
+            tier = (r.get("분류") or "").strip() or "개인의원"
+            address = (r.get("주소") or "").strip()
+            acct_notes = (r.get("거래처 메모") or "").strip()
+
             if hospital in all_accounts:
                 acct = all_accounts[hospital]
-                # Update contact info if newly provided
-                if contact_name or email or phone:
-                    acct.contact_name = contact_name or acct.contact_name
-                    acct.email = email or acct.email
-                    acct.phone = phone or acct.phone
-                    _db.upsert_account(acct)
+                acct.contact_name = contact_name or acct.contact_name
+                acct.email = email or acct.email
+                acct.phone = phone or acct.phone
+                if tier and tier != "개인의원":
+                    acct.tier = tier
+                if address:
+                    acct.address = address
+                if acct_notes:
+                    acct.notes = acct_notes
+                _db.upsert_account(acct)
                 account_id = acct.id
             else:
                 new_acct = Account(
                     name=hospital,
+                    tier=tier,
                     contact_name=contact_name,
                     email=email,
                     phone=phone,
+                    address=address,
+                    notes=acct_notes,
                 )
                 new_id = _db.upsert_account(new_acct)
                 new_acct.id = new_id
                 all_accounts[hospital] = new_acct
+                phone_to_account[phone] = new_acct
                 account_id = new_id
 
-            # Lead title defaults to hospital name if not separately specified
-            title = (r.get("리드 이름") or r.get("딜 이름") or hospital).strip()
-            raw_stage = (r.get("단계") or "리드").strip()
-            stage = raw_stage if raw_stage in valid_stages else "리드"
+            title = (r.get("리드 이름") or hospital).strip()
+            raw_stage = (r.get("단계") or "").strip()
+            stage = raw_stage if raw_stage in valid_stages else default_stage
             raw_val = (r.get("금액(원)") or r.get("금액") or "0").strip().replace(",", "")
             value = int(raw_val) if raw_val.isdigit() else 0
 
@@ -519,7 +563,7 @@ async def import_deals(file: UploadFile = File(...)):
                 stage=stage,
                 value=value,
                 next_action=(r.get("다음 액션") or "").strip(),
-                next_action_date=(r.get("날짜(YYYY-MM-DD)") or r.get("날짜") or "").strip(),
+                next_action_date=(r.get("날짜(YYYY-MM-DD)") or "").strip(),
                 notes=(r.get("메모") or "").strip(),
             )
             _db.upsert_deal(d)
@@ -527,7 +571,7 @@ async def import_deals(file: UploadFile = File(...)):
         except Exception as e:
             errors.append(f"{i}행: {e}")
 
-    return {"imported": imported, "errors": errors, "columns": columns}
+    return {"imported": imported, "duplicates": duplicates, "errors": errors, "columns": columns}
 
 
 @app.post("/api/import/accounts")
