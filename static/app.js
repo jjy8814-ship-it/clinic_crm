@@ -32,7 +32,13 @@ async function navigate(page) {
 
   try {
     if (page === 'dashboard') {
-      state.data.dashboard = await get('/api/dashboard');
+      [state.data.dashboard, state.data.dashboardConfig] = await Promise.all([
+        get('/api/dashboard'),
+        get('/api/dashboard-config'),
+      ]);
+      if (state.data.dashboardConfig?.config) {
+        state.dashboardWidgets = state.data.dashboardConfig.config;
+      }
     } else if (page === 'pipeline') {
       [state.data.deals, state.accounts] = await Promise.all([
         get('/api/deals?include_closed=true'), get('/api/accounts'),
@@ -104,112 +110,307 @@ function fmtValShort(v) {
   return `${n.toLocaleString()}원`;
 }
 
-// ── Templates ─────────────────────────────────────────────────────────────────
+// ── Dashboard metric registry (add new metrics here → auto-available in picker) ──
+
+const METRIC_REGISTRY = [
+  { id:'revenue_total',    label:'누적 매출',        cat:'매출',   types:['card'] },
+  { id:'revenue_month',    label:'이번달 매출',       cat:'매출',   types:['card'] },
+  { id:'lead_active',      label:'활성 리드',         cat:'리드',   types:['card'] },
+  { id:'lead_closed',      label:'계약완료 수',       cat:'리드',   types:['card'] },
+  { id:'total_cogs',       label:'매출원가 합계',     cat:'P&L',   types:['card'] },
+  { id:'gross_profit',     label:'공헌이익',          cat:'P&L',   types:['card'] },
+  { id:'total_expenses',   label:'비용 합계',         cat:'P&L',   types:['card'] },
+  { id:'operating_income', label:'영업이익',          cat:'P&L',   types:['card'] },
+  { id:'hospital_ranking', label:'병원별 매출 순위',  cat:'분석',  types:['bar','table'] },
+  { id:'monthly_revenue',  label:'월별 매출 추이',    cat:'분석',  types:['bar','line'] },
+  { id:'pipeline_status',  label:'파이프라인 현황',   cat:'리드',  types:['table'] },
+];
+
+const DEFAULT_WIDGETS = [
+  { id:'w1', metric:'lead_active',      displayType:'card',  colSpan:1 },
+  { id:'w2', metric:'lead_closed',      displayType:'card',  colSpan:1 },
+  { id:'w3', metric:'revenue_total',    displayType:'card',  colSpan:1 },
+  { id:'w4', metric:'revenue_month',    displayType:'card',  colSpan:1 },
+  { id:'w5', metric:'hospital_ranking', displayType:'bar',   colSpan:2 },
+  { id:'w6', metric:'pipeline_status',  displayType:'table', colSpan:2 },
+  { id:'w7', metric:'monthly_revenue',  displayType:'bar',   colSpan:4 },
+];
+
+// ── Dashboard widget rendering ─────────────────────────────────────────────────
+
+function renderWidget(w, d) {
+  const def = METRIC_REGISTRY.find(m => m.id === w.metric);
+  if (!def) return '';
+  const label = def.label;
+
+  // ── Scalar card metrics ──
+  const scalarVal = getMetricValue(w.metric, d);
+  if (w.displayType === 'card') {
+    const color = getMetricColor(w.metric, scalarVal);
+    return `
+      <div class="stat-card" style="grid-column:span ${w.colSpan||1}">
+        <div class="stat-label">${label}</div>
+        <div class="stat-value" style="color:${color};font-size:24px">${fmtWidgetVal(w.metric, scalarVal)}</div>
+      </div>`;
+  }
+
+  // ── List metrics ──
+  const content = renderWidgetContent(w, d);
+  return `
+    <div class="card" style="grid-column:span ${w.colSpan||1};overflow:hidden">
+      <div style="padding:14px 20px;border-bottom:1px solid var(--border);font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:space-between">
+        <span>${label}</span>
+      </div>
+      <div style="padding:12px 16px">${content}</div>
+    </div>`;
+}
+
+function getMetricValue(metric, d) {
+  const dd = d || {};
+  switch(metric) {
+    case 'revenue_total':    return dd.total_revenue   || 0;
+    case 'revenue_month':    return dd.month_revenue   || 0;
+    case 'lead_active':      return dd.active_count    || 0;
+    case 'lead_closed':      return dd.closed_count    || 0;
+    case 'total_cogs':       return dd.total_cogs      || 0;
+    case 'gross_profit':     return dd.total_gross     || 0;
+    case 'total_expenses':   return dd.total_expenses  || 0;
+    case 'operating_income': return dd.total_operating || 0;
+    default: return 0;
+  }
+}
+
+function getMetricColor(metric, val) {
+  if (metric === 'lead_active')      return '#1B64DA';
+  if (metric === 'lead_closed')      return '#00B140';
+  if (metric === 'revenue_total')    return '#191F28';
+  if (metric === 'revenue_month')    return '#FF6D00';
+  if (metric === 'total_cogs')       return '#F04452';
+  if (metric === 'total_expenses')   return '#FF6D00';
+  if (metric === 'gross_profit')     return val >= 0 ? '#7B61FF' : '#F04452';
+  if (metric === 'operating_income') return val >= 0 ? '#00B140' : '#F04452';
+  return '#191F28';
+}
+
+function fmtWidgetVal(metric, val) {
+  if (metric === 'lead_active' || metric === 'lead_closed') return `${val}건`;
+  return fmtValShort(val);
+}
+
+function renderWidgetContent(w, d) {
+  const dd = d || {};
+  if (w.metric === 'hospital_ranking') {
+    const ranking = dd.hospital_ranking || [];
+    const maxRev = Math.max(1, ...ranking.map(r => r.revenue));
+    if (!ranking.length) return `<div style="text-align:center;color:#B0B8C1;padding:24px;font-size:13px">데이터 없음</div>`;
+    if (w.displayType === 'table') {
+      return `<table class="order-table"><thead><tr><th>순위</th><th>병원명</th><th style="text-align:right">매출</th></tr></thead><tbody>`
+        + ranking.map((r,i) => `<tr><td>${i+1}</td><td>${esc(r.name)}</td><td style="text-align:right;font-weight:600">${fmtValShort(r.revenue)}</td></tr>`).join('')
+        + `</tbody></table>`;
+    }
+    // bar
+    return `<div style="display:flex;flex-direction:column;gap:6px">`
+      + ranking.map(r => {
+          const pct = Math.max(3, Math.round(r.revenue / maxRev * 100));
+          return `<div style="display:flex;align-items:center;gap:8px">
+            <span style="width:120px;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.name)}</span>
+            <div style="flex:1;background:#F2F4F6;border-radius:4px;height:16px;overflow:hidden">
+              <div style="width:${pct}%;height:100%;background:#1B64DA;border-radius:4px"></div>
+            </div>
+            <span style="width:70px;text-align:right;font-size:13px;font-weight:600">${fmtValShort(r.revenue)}</span>
+          </div>`;
+        }).join('')
+      + `</div>`;
+  }
+  if (w.metric === 'monthly_revenue') {
+    const trend = (dd.monthly_trend || []).slice().reverse();
+    if (!trend.length) return `<div style="text-align:center;color:#B0B8C1;padding:24px;font-size:13px">데이터 없음</div>`;
+    const maxT = Math.max(1, ...trend.map(t => t.revenue));
+    if (w.displayType === 'line') {
+      const pts = trend.map((t,i) => {
+        const x = 40 + i * (560 / Math.max(trend.length-1,1));
+        const y = 100 - Math.round(t.revenue / maxT * 80);
+        return `${x},${y}`;
+      }).join(' ');
+      const circles = trend.map((t,i) => {
+        const x = 40 + i * (560 / Math.max(trend.length-1,1));
+        const y = 100 - Math.round(t.revenue / maxT * 80);
+        return `<circle cx="${x}" cy="${y}" r="4" fill="#1B64DA"/>
+          <text x="${x}" y="${y-8}" text-anchor="middle" font-size="9" fill="#4E5968">${fmtValShort(t.revenue)}</text>`;
+      }).join('');
+      const labels = trend.map((t,i) => {
+        const x = 40 + i * (560 / Math.max(trend.length-1,1));
+        return `<text x="${x}" y="115" text-anchor="middle" font-size="9" fill="#8B95A1">${(t.month||'').slice(5)}월</text>`;
+      }).join('');
+      return `<svg viewBox="0 0 600 125" style="width:100%;overflow:visible">
+        <polyline points="${pts}" fill="none" stroke="#1B64DA" stroke-width="2" stroke-linejoin="round"/>
+        ${circles}${labels}
+      </svg>`;
+    }
+    // bar
+    return `<div style="display:flex;gap:6px;align-items:flex-end;height:110px">`
+      + trend.map(t => {
+          const pct = Math.max(4, Math.round(t.revenue / maxT * 100));
+          return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+            <span style="font-size:10px;font-weight:600;color:#191F28">${fmtValShort(t.revenue)}</span>
+            <div style="width:100%;background:#F2F4F6;border-radius:4px;flex:1;display:flex;align-items:flex-end">
+              <div style="width:100%;height:${pct}%;background:#1B64DA;border-radius:4px"></div>
+            </div>
+            <span style="font-size:10px;color:#8B95A1">${(t.month||'').slice(5)}월</span>
+          </div>`;
+        }).join('')
+      + `</div>`;
+  }
+  if (w.metric === 'pipeline_status') {
+    const summary = dd.summary || {};
+    const stageColors = {'제안 완료':'#7B61FF','미팅 확정':'#1B64DA','계약 대기중':'#FF6D00'};
+    const stages = (state.config.stages||[]).filter(s => s!=='계약완료'&&s!=='Lost');
+    const rows = stages.map(s => {
+      const info = summary[s]||{count:0};
+      return `<tr><td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${stageColors[s]||'#B0B8C1'};margin-right:6px"></span>${s}</td><td style="text-align:right;font-weight:700">${info.count}건</td></tr>`;
+    }).join('');
+    return `<table class="order-table"><tbody>${rows||'<tr><td colspan="2" style="text-align:center;color:#B0B8C1">리드 없음</td></tr>'}</tbody></table>`;
+  }
+  return '';
+}
+
+// ── tplDashboard ───────────────────────────────────────────────────────────────
 
 function tplDashboard(d) {
-  const {
-    active_count    = 0,
-    closed_count    = 0,
-    total_revenue   = 0,
-    month_revenue   = 0,
-    hospital_ranking = [],
-    monthly_trend   = [],
-    summary         = {},
-  } = d || {};
-
   const today = new Date();
   const dayNames = ['일','월','화','수','목','금','토'];
   const dateStr = `${today.getFullYear()}년 ${today.getMonth()+1}월 ${today.getDate()}일 (${dayNames[today.getDay()]})`;
 
-  // ── KPI 카드 ──
-  const kpis = [
-    { label: '활성 리드',    value: `${active_count}건`,              color: '#1B64DA', sub: '영업 진행 중' },
-    { label: '계약 완료',    value: `${closed_count}건`,              color: '#00B140', sub: '누적 계약' },
-    { label: '누적 매출',    value: fmtValShort(total_revenue),       color: '#191F28', sub: '발주 기준' },
-    { label: '이번 달 매출', value: fmtValShort(month_revenue),       color: '#FF6D00', sub: today.getMonth()+1 + '월' },
-  ].map(k => `
-    <div class="stat-card">
-      <div class="stat-label">${k.label}</div>
-      <div class="stat-value" style="color:${k.color}">${k.value}</div>
-      <div style="font-size:12px;color:var(--text-3);margin-top:2px">${k.sub}</div>
-    </div>`).join('');
+  const widgets = state.dashboardWidgets || DEFAULT_WIDGETS;
 
-  // ── 병원별 매출 순위 ──
-  const ranking = hospital_ranking;
-  const maxRev = Math.max(1, ...ranking.map(r => r.revenue));
-  const rankRows = ranking.length
-    ? ranking.map((r, i) => {
-        const pct = Math.max(3, Math.round(r.revenue / maxRev * 100));
-        const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}.`;
-        return `
-          <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #F2F4F6">
-            <span style="width:28px;font-size:13px;flex-shrink:0;text-align:center">${medal}</span>
-            <span style="flex:1;font-size:14px;font-weight:500;color:#191F28;white-space:normal;word-break:keep-all">${esc(r.name)}</span>
-            <div style="flex:2;background:#F2F4F6;border-radius:4px;height:8px;overflow:hidden">
-              <div style="width:${pct}%;height:100%;background:#1B64DA;border-radius:4px"></div>
-            </div>
-            <span style="font-size:13px;font-weight:600;color:#191F28;flex-shrink:0;min-width:70px;text-align:right">${fmtValShort(r.revenue)}</span>
-          </div>`;
-      }).join('')
-    : `<div style="padding:32px 0;text-align:center;color:#B0B8C1;font-size:13px">발주 데이터가 없습니다</div>`;
-
-  // ── 월별 매출 추이 ──
-  const trend = monthly_trend.slice().reverse();
-  const maxTrend = Math.max(1, ...trend.map(t => t.revenue));
-  const trendBars = trend.length
-    ? trend.map(t => {
-        const pct = Math.max(4, Math.round(t.revenue / maxTrend * 100));
-        const [y, m] = t.month.split('-');
-        return `
-          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px">
-            <span style="font-size:11px;font-weight:600;color:#191F28">${fmtValShort(t.revenue)}</span>
-            <div style="width:100%;background:#F2F4F6;border-radius:4px;height:80px;display:flex;align-items:flex-end">
-              <div style="width:100%;height:${pct}%;background:#1B64DA;border-radius:4px;transition:height 0.3s"></div>
-            </div>
-            <span style="font-size:11px;color:#8B95A1">${m}월</span>
-          </div>`;
-      }).join('')
-    : `<div style="padding:32px 0;text-align:center;color:#B0B8C1;font-size:13px;width:100%">발주 데이터가 없습니다</div>`;
-
-  // ── 파이프라인 현황 ──
-  const stageColors = { '제안 완료':'#7B61FF', '미팅 확정':'#1B64DA', '계약 대기중':'#FF6D00' };
-  const activeStages = (state.config.stages || []).filter(s => s !== '계약완료' && s !== 'Lost');
-  const pipeRows = activeStages.map(s => {
-    const info = summary[s] || { count: 0, total: 0 };
-    if (!info.count) return '';
-    return `
-      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #F2F4F6">
-        <span style="width:8px;height:8px;border-radius:50%;background:${stageColors[s]||'#B0B8C1'};flex-shrink:0"></span>
-        <span style="flex:1;font-size:14px;color:#191F28">${s}</span>
-        <span style="font-size:13px;font-weight:700;color:#191F28">${info.count}건</span>
-      </div>`;
-  }).join('');
+  // Group widgets into rows of total colSpan ≤ 4
+  const widgetHtml = widgets.map(w => renderWidget(w, d)).join('');
 
   return `
-    <div class="page-header">
-      <h1 class="page-title">대시보드</h1>
-      <p class="page-subtitle">${dateStr}</p>
-    </div>
-
-    <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:var(--s6)">${kpis}</div>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s5);margin-bottom:var(--s5)">
-      <div class="card">
-        <div style="padding:var(--s4) var(--s5);border-bottom:1px solid var(--border);font-size:15px;font-weight:700">병원별 매출 순위</div>
-        <div style="padding:0 var(--s5) var(--s3)">${rankRows}</div>
+    <div class="page-header-row">
+      <div>
+        <h1 class="page-title">대시보드</h1>
+        <p class="page-subtitle">${dateStr}</p>
       </div>
-      <div class="card">
-        <div style="padding:var(--s4) var(--s5);border-bottom:1px solid var(--border);font-size:15px;font-weight:700">파이프라인 현황</div>
-        <div style="padding:0 var(--s5) var(--s3)">
-          ${pipeRows || `<div style="padding:32px 0;text-align:center;color:#B0B8C1;font-size:13px">등록된 리드가 없습니다</div>`}
-        </div>
-      </div>
+      <button class="btn btn-secondary" onclick="openDashboardEditor()">대시보드 편집</button>
     </div>
-
-    <div class="card">
-      <div style="padding:var(--s4) var(--s5);border-bottom:1px solid var(--border);font-size:15px;font-weight:700">월별 매출 추이</div>
-      <div style="padding:var(--s4) var(--s5);display:flex;gap:8px;align-items:flex-end">${trendBars}</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--s4)">
+      ${widgetHtml}
     </div>`;
+}
+
+// ── Dashboard editor ───────────────────────────────────────────────────────────
+
+function openDashboardEditor() {
+  const widgets = (state.dashboardWidgets || DEFAULT_WIDGETS).map(w => ({...w}));
+  state._editWidgets = widgets;
+  renderDashboardEditor();
+}
+
+function renderDashboardEditor() {
+  const widgets = state._editWidgets || [];
+  const colOpts = n => [1,2,3,4].map(v => `<option value="${v}" ${v===n?'selected':''}>${v}열</option>`).join('');
+
+  const rows = widgets.map((w,i) => {
+    const def = METRIC_REGISTRY.find(m => m.id === w.metric) || {};
+    const typeOpts = (def.types||['card']).map(t =>
+      `<option value="${t}" ${w.displayType===t?'selected':''}>${{card:'숫자카드',bar:'막대그래프',line:'꺾은선그래프',table:'테이블'}[t]||t}</option>`
+    ).join('');
+    return `
+      <div style="display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--border)">
+        <span style="flex:1;font-size:14px;font-weight:500">${esc(def.label||w.metric)}</span>
+        <select class="form-select" style="width:130px;height:32px;font-size:12px" onchange="updateEditWidget(${i},'displayType',this.value)">${typeOpts}</select>
+        <select class="form-select" style="width:70px;height:32px;font-size:12px" onchange="updateEditWidget(${i},'colSpan',+this.value)">${colOpts(w.colSpan||1)}</select>
+        <button class="btn btn-sm btn-danger" style="height:30px;padding:0 10px;font-size:11px" onclick="removeEditWidget(${i})">삭제</button>
+        ${i>0?`<button class="btn btn-sm btn-secondary" style="height:30px;padding:0 8px;font-size:11px" onclick="moveEditWidget(${i},-1)">↑</button>`:'<span style="width:34px"></span>'}
+        ${i<widgets.length-1?`<button class="btn btn-sm btn-secondary" style="height:30px;padding:0 8px;font-size:11px" onclick="moveEditWidget(${i},1)">↓</button>`:'<span style="width:34px"></span>'}
+      </div>`;
+  }).join('') || '<div style="color:var(--text-3);padding:16px;text-align:center">위젯 없음</div>';
+
+  // Metric picker grouped by category
+  const cats = [...new Set(METRIC_REGISTRY.map(m => m.cat))];
+  const pickerGroups = cats.map(cat => {
+    const items = METRIC_REGISTRY.filter(m => m.cat === cat);
+    return `<optgroup label="${cat}">`
+      + items.map(m => `<option value="${m.id}">${m.label}</option>`).join('')
+      + `</optgroup>`;
+  }).join('');
+
+  openModal('대시보드 편집', `
+    <div style="min-width:560px">
+      <div style="margin-bottom:var(--s4)">${rows}</div>
+      <div style="display:flex;gap:8px;padding:var(--s3);background:var(--gray-50);border-radius:var(--r-md)">
+        <select id="dash-add-metric" class="form-select" style="flex:1;height:36px;font-size:13px">
+          ${pickerGroups}
+        </select>
+        <button class="btn btn-primary" style="height:36px;padding:0 16px;font-size:13px" onclick="addEditWidget()">+ 추가</button>
+      </div>
+      <div class="form-actions" style="margin-top:var(--s4)">
+        <button class="btn btn-primary btn-full" onclick="saveDashboardConfig()">저장</button>
+        <button class="btn btn-secondary btn-full" onclick="resetDashboardConfig()">기본값으로 초기화</button>
+        <button class="btn btn-secondary btn-full" onclick="closeModal()">취소</button>
+      </div>
+    </div>`);
+}
+
+function updateEditWidget(i, key, val) {
+  if (state._editWidgets && state._editWidgets[i]) {
+    state._editWidgets[i][key] = val;
+    const def = METRIC_REGISTRY.find(m => m.id === state._editWidgets[i].metric);
+    if (key === 'displayType' && def && !def.types.includes(val)) {
+      state._editWidgets[i].displayType = def.types[0];
+    }
+  }
+}
+
+function removeEditWidget(i) {
+  if (state._editWidgets) {
+    state._editWidgets.splice(i, 1);
+    renderDashboardEditor();
+  }
+}
+
+function moveEditWidget(i, dir) {
+  const w = state._editWidgets;
+  if (!w) return;
+  const j = i + dir;
+  if (j < 0 || j >= w.length) return;
+  [w[i], w[j]] = [w[j], w[i]];
+  renderDashboardEditor();
+}
+
+function addEditWidget() {
+  const sel = document.getElementById('dash-add-metric');
+  if (!sel) return;
+  const metricId = sel.value;
+  const def = METRIC_REGISTRY.find(m => m.id === metricId);
+  if (!def) return;
+  if (!state._editWidgets) state._editWidgets = [];
+  state._editWidgets.push({
+    id: 'w' + Date.now(),
+    metric: metricId,
+    displayType: def.types[0],
+    colSpan: def.types[0] === 'card' ? 1 : 2,
+  });
+  renderDashboardEditor();
+}
+
+async function saveDashboardConfig() {
+  const widgets = state._editWidgets || [];
+  await put('/api/dashboard-config', { config: widgets });
+  state.dashboardWidgets = widgets;
+  closeModal();
+  showToast('대시보드가 저장되었습니다');
+  render();
+}
+
+async function resetDashboardConfig() {
+  await put('/api/dashboard-config', { config: DEFAULT_WIDGETS });
+  state.dashboardWidgets = DEFAULT_WIDGETS.map(w => ({...w}));
+  state._editWidgets = state.dashboardWidgets.map(w => ({...w}));
+  closeModal();
+  showToast('기본값으로 초기화되었습니다');
+  render();
 }
 
 // ── Kanban drag state ──────────────────────────────────────────────────────────
@@ -386,7 +587,6 @@ function tplContacts(accounts) {
   }
   if (sort === 'name-asc')  list.sort((a,b) => a.name.localeCompare(b.name));
   if (sort === 'name-desc') list.sort((a,b) => b.name.localeCompare(a.name));
-  if (sort === 'deals')     list.sort((a,b) => (b.deal_count||0) - (a.deal_count||0));
 
   const sortBtn = (id, label) =>
     `<button class="filter-tab ${sort===id?'active':''}" onclick="setContactSort('${id}')">${label}</button>`;
@@ -411,7 +611,7 @@ function tplContacts(accounts) {
             ${a.address      ? `<div class="account-info-row">📍 ${esc(a.address)}</div>` : ''}
           </div>
           <div class="account-card-footer">
-            <span class="account-deal-count">딜 <strong>${a.deal_count}</strong>건</span>
+            ${a.lead_stage ? badge(a.lead_stage) : '<span style="font-size:12px;color:var(--text-3)">리드 없음</span>'}
             <button class="btn-ghost btn btn-sm" onclick="event.stopPropagation();addDealForAccount(${a.id})">+ 리드 추가</button>
           </div>
         </div>`)
@@ -437,7 +637,6 @@ function tplContacts(accounts) {
       <div class="filter-tabs" style="margin-bottom:0">
         ${sortBtn('name-asc','이름 ▲')}
         ${sortBtn('name-desc','이름 ▼')}
-        ${sortBtn('deals','딜 많은순')}
       </div>
     </div>
     <div class="account-grid">${cards}</div>`;
@@ -479,20 +678,22 @@ function tplActivities(activities) {
         <tr onclick="openActivityDetail(${a.id})" style="cursor:pointer" title="클릭하면 전체 내용을 볼 수 있습니다">
           <td style="color:#4E5968;font-size:13px;white-space:nowrap">${a.date || '—'}</td>
           <td>${typeBadge(a.type)}</td>
-          <td style="font-weight:500;color:#191F28">${esc(a.deal_title || a.account_name || '—')}</td>
+          <td style="color:#4E5968">${esc(a.assignee || '—')}</td>
+          <td style="font-weight:500;color:#191F28">${esc(a.account_name || '—')}</td>
           <td style="color:#4E5968;max-width:340px">
             <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((a.notes || '').slice(0, 100))}${(a.notes||'').length > 100 ? '…' : ''}</div>
           </td>
         </tr>`)
       .join('')
-    : `<tr><td colspan="4" style="text-align:center;padding:48px;color:var(--text-3)">활동 기록이 없습니다</td></tr>`;
+    : `<tr><td colspan="5" style="text-align:center;padding:48px;color:var(--text-3)">활동 기록이 없습니다</td></tr>`;
 
   return `
     <div class="page-header-row">
       <h1 class="page-title">활동 로그</h1>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;align-items:center">
         <button class="filter-tab ${sortDir==='newest'?'active':''}" onclick="setActivitySort('newest')">최신순</button>
         <button class="filter-tab ${sortDir==='oldest'?'active':''}" onclick="setActivitySort('oldest')">오래된순</button>
+        <button class="btn btn-primary" style="height:36px;padding:0 16px;font-size:13px" onclick="openNewActivityModal()">+ 새 활동 추가</button>
       </div>
     </div>
     <div class="filter-tabs" style="margin-bottom:var(--s4)">${typePills}</div>
@@ -502,7 +703,8 @@ function tplActivities(activities) {
           <tr>
             <th style="width:110px">날짜</th>
             <th style="width:76px">유형</th>
-            <th style="width:200px">병원 / 딜</th>
+            <th style="width:160px">담당자</th>
+            <th style="width:220px">병원</th>
             <th>내용 <span style="font-size:11px;font-weight:400;color:#B0B8C1">(클릭하면 전체 내용)</span></th>
           </tr>
         </thead>
@@ -549,40 +751,46 @@ function tplPL(pl, expenses) {
   const expensesDetail = pl?.expenses_detail || {};
   const ordersDetail   = pl?.orders_detail   || {};
   const selectedMonth  = state.plSelectedMonth || '';
+  const expSort        = state.expSort || { col: 'date', dir: 'desc' };
+  const expFilters     = state.expFilters || {};
 
   const fmt  = v => (v || 0).toLocaleString() + '원';
   const sign = v => v >= 0
     ? `<span style="color:#00B140">${fmt(v)}</span>`
     : `<span style="color:#F04452">${fmt(v)}</span>`;
 
+  const gross = t.gross ?? ((t.revenue||0) - (t.cogs||0));
   const summaryCards = [
-    { label: '총 매출',     value: fmt(t.revenue),   color: '#191F28' },
-    { label: '매출원가',    value: fmt(t.cogs),      color: '#F04452' },
-    { label: '비용 합계',   value: fmt(t.expenses),  color: '#FF6D00' },
-    { label: '영업이익',    value: fmt(t.operating), color: (t.operating||0) >= 0 ? '#00B140' : '#F04452' },
+    { label: '총 매출',   value: fmt(t.revenue),   color: '#191F28' },
+    { label: '매출원가',  value: fmt(t.cogs),      color: '#F04452' },
+    { label: '공헌이익',  value: fmt(gross),        color: gross >= 0 ? '#7B61FF' : '#F04452' },
+    { label: '비용 합계', value: fmt(t.expenses),  color: '#FF6D00' },
+    { label: '영업이익',  value: fmt(t.operating), color: (t.operating||0) >= 0 ? '#00B140' : '#F04452' },
   ].map(c => `
     <div class="stat-card">
       <div class="stat-label">${c.label}</div>
-      <div class="stat-value" style="color:${c.color}">${c.value}</div>
+      <div class="stat-value" style="color:${c.color};font-size:22px">${c.value}</div>
     </div>`).join('');
 
-  const CATS = ['판관비', '마케팅비', '고정비'];
+  const CATS = pl?.expense_categories || state.config.expense_categories || ['판관비', '마케팅비', '고정비'];
 
   const monthRows = rows.length ? rows.map(r => {
     const catCols = CATS.map(cat =>
       `<td style="text-align:right;color:#FF6D00">${((r.cat_totals||{})[cat]||0).toLocaleString()}</td>`
     ).join('');
+    const rGross = r.gross ?? (r.revenue - r.cogs);
     return `
       <tr style="cursor:pointer" onclick="setPLMonth('${r.month}')" title="${r.month} 상세 보기">
         <td style="font-weight:600;color:${selectedMonth===r.month?'#1B64DA':'inherit'}">${r.month}${selectedMonth===r.month?' ▶':''}</td>
         <td style="text-align:right">${r.units}대</td>
         <td style="text-align:right">${(r.revenue).toLocaleString()}</td>
         <td style="text-align:right;color:#F04452">${(r.cogs).toLocaleString()}</td>
+        <td style="text-align:right;color:#7B61FF;font-weight:600">${rGross.toLocaleString()}</td>
         ${catCols}
         <td style="text-align:right;font-weight:700">${sign(r.operating)}</td>
       </tr>`;
   }).join('')
-  : `<tr><td colspan="${4+CATS.length}" style="text-align:center;padding:24px;color:#B0B8C1">발주 데이터가 없습니다</td></tr>`;
+  : `<tr><td colspan="${5+CATS.length}" style="text-align:center;padding:24px;color:#B0B8C1">발주 데이터가 없습니다</td></tr>`;
 
   // Month detail panel
   let detailHtml = '';
@@ -635,27 +843,63 @@ function tplPL(pl, expenses) {
       </div>`;
   }
 
-  const expRows = exps.length ? exps.map(e => `
+  // Expense table sorting and filtering
+  const expSortCol = expSort.col;
+  const expSortDir = expSort.dir;
+  const expFilterCat  = expFilters.category || '';
+  const expFilterName = (expFilters.name || '').toLowerCase();
+
+  let filteredExps = [...exps];
+  if (expFilterCat)  filteredExps = filteredExps.filter(e => (e.category||'판관비') === expFilterCat);
+  if (expFilterName) filteredExps = filteredExps.filter(e => (e.name||'').toLowerCase().includes(expFilterName));
+
+  filteredExps.sort((a, b) => {
+    let va, vb;
+    if (expSortCol === 'date')     { va = a.date || a.month || ''; vb = b.date || b.month || ''; }
+    else if (expSortCol === 'cat') { va = a.category||''; vb = b.category||''; }
+    else if (expSortCol === 'name'){ va = a.name||''; vb = b.name||''; }
+    else if (expSortCol === 'amt') { va = a.amount||0; vb = b.amount||0; }
+    else { va = ''; vb = ''; }
+    if (va < vb) return expSortDir === 'asc' ? -1 : 1;
+    if (va > vb) return expSortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  const thSort = (col, label) => {
+    const active = expSortCol === col;
+    const arrow  = active ? (expSortDir === 'asc' ? ' ▲' : ' ▼') : '';
+    return `<th style="cursor:pointer;user-select:none" onclick="setExpSort('${col}')">${label}${arrow}</th>`;
+  };
+
+  const catFilterOpts = `<option value="">전체</option>` + CATS.map(c =>
+    `<option value="${c}" ${expFilterCat===c?'selected':''}>${c}</option>`
+  ).join('');
+
+  const expRows = filteredExps.length ? filteredExps.map(e => {
+    const displayDate = e.date || e.month || '—';
+    return `
     <tr>
-      <td>${esc(e.month || '—')}</td>
+      <td style="white-space:nowrap">${esc(displayDate)}</td>
       <td><span style="font-size:11px;background:#F2F4F6;padding:1px 6px;border-radius:4px">${esc(e.category||'판관비')}</span></td>
       <td>${esc(e.name)}</td>
       <td style="text-align:right;font-weight:600">${(e.amount).toLocaleString()}원</td>
       <td>${esc(e.notes || '')}</td>
-      <td style="text-align:center">
+      <td style="text-align:center;white-space:nowrap">
         <button class="btn btn-sm btn-secondary" style="height:26px;padding:0 10px;font-size:11px" onclick="openExpenseModal(${e.id})">수정</button>
         <button class="btn btn-sm btn-danger"    style="height:26px;padding:0 10px;font-size:11px" onclick="confirmDeleteExpense(${e.id},'${esc(e.name).replace(/'/g,"\\'")}')">삭제</button>
       </td>
-    </tr>`).join('')
+    </tr>`;
+  }).join('')
   : `<tr><td colspan="6" style="text-align:center;padding:24px;color:#B0B8C1">등록된 비용 항목이 없습니다</td></tr>`;
 
   const catHeaders = CATS.map(c => `<th style="text-align:right">${c}</th>`).join('');
 
   return `
     <div class="page-header-row">
-      <h1 class="page-title">P&L 관리</h1>
+      <h1 class="page-title">P&amp;L 관리</h1>
+      <button class="btn btn-secondary" onclick="openExpenseCategoriesModal()">비용 카테고리 관리</button>
     </div>
-    <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:var(--s5)">${summaryCards}</div>
+    <div class="stat-grid" style="grid-template-columns:repeat(5,1fr);margin-bottom:var(--s5)">${summaryCards}</div>
 
     ${detailHtml}
 
@@ -665,6 +909,7 @@ function tplPL(pl, expenses) {
         <thead><tr>
           <th>월</th><th style="text-align:right">판매량</th>
           <th style="text-align:right">매출</th><th style="text-align:right">원가</th>
+          <th style="text-align:right;color:#7B61FF">공헌이익</th>
           ${catHeaders}
           <th style="text-align:right">영업이익</th>
         </tr></thead>
@@ -678,7 +923,22 @@ function tplPL(pl, expenses) {
         <button class="btn btn-primary" style="height:34px;padding:0 14px;font-size:13px" onclick="openExpenseModal(null)">+ 항목 추가</button>
       </div>
       <table class="order-table">
-        <thead><tr><th>월</th><th>카테고리</th><th>항목명</th><th style="text-align:right">금액</th><th>메모</th><th style="text-align:center">관리</th></tr></thead>
+        <thead>
+          <tr>
+            ${thSort('date','날짜')}
+            ${thSort('cat','카테고리')}
+            ${thSort('name','항목명')}
+            ${thSort('amt','금액')}
+            <th>메모</th>
+            <th style="text-align:center">관리</th>
+          </tr>
+          <tr style="background:#FAFBFC">
+            <td></td>
+            <td><select class="form-select" style="height:28px;font-size:12px;padding:2px 6px" onchange="setExpFilter('category',this.value)">${catFilterOpts}</select></td>
+            <td><input class="form-input" style="height:28px;font-size:12px;padding:2px 8px" placeholder="검색..." value="${esc(expFilters.name||'')}" oninput="setExpFilter('name',this.value)"></td>
+            <td></td><td></td><td></td>
+          </tr>
+        </thead>
         <tbody>${expRows}</tbody>
       </table>
     </div>`;
@@ -689,19 +949,32 @@ function setPLMonth(m) {
   render();
 }
 
+function setExpSort(col) {
+  const cur = state.expSort || { col: 'date', dir: 'desc' };
+  state.expSort = { col, dir: (cur.col === col && cur.dir === 'asc') ? 'desc' : 'asc' };
+  render();
+}
+
+function setExpFilter(key, val) {
+  if (!state.expFilters) state.expFilters = {};
+  state.expFilters[key] = val;
+  render();
+}
+
 function openExpenseModal(idOrNull) {
   const e = typeof idOrNull === 'number'
     ? (state.data.expenses || []).find(x => x.id === idOrNull) || {}
     : {};
-  const today = new Date().toISOString().slice(0, 7);
-  const CATS = ['판관비', '마케팅비', '고정비'];
-  const catOpts = CATS.map(c => `<option value="${c}" ${(e.category||'판관비')===c?'selected':''}>${c}</option>`).join('');
+  const today = new Date().toISOString().slice(0, 10);
+  const CATS = state.config.expense_categories || ['판관비', '마케팅비', '고정비'];
+  const catOpts = CATS.map(c => `<option value="${c}" ${(e.category||CATS[0])===c?'selected':''}>${c}</option>`).join('');
+  const currentDate = e.date || (e.month ? e.month + '-01' : today);
   openModal(e.id ? '비용 수정' : '비용 추가', `
     <form class="form" id="expense-form" onsubmit="saveExpense(event)" data-id="${e.id || ''}">
       <div class="form-row">
         <div class="form-group">
-          <label class="form-label">월 <span class="req">*</span></label>
-          <input class="form-input" name="month" type="month" value="${e.month || today}" required>
+          <label class="form-label">날짜 <span class="req">*</span></label>
+          <input class="form-input" name="date" type="date" value="${currentDate}" required>
         </div>
         <div class="form-group">
           <label class="form-label">카테고리</label>
@@ -733,10 +1006,12 @@ async function saveExpense(event) {
   event.preventDefault();
   const form = event.target;
   const fd = new FormData(form);
+  const dateVal = fd.get('date') || '';
   const body = {
     name:     fd.get('name').trim(),
     amount:   parseInt(fd.get('amount')) || 0,
-    month:    fd.get('month') || '',
+    date:     dateVal,
+    month:    dateVal ? dateVal.slice(0, 7) : '',
     notes:    fd.get('notes').trim(),
     category: fd.get('category') || '판관비',
   };
@@ -757,6 +1032,49 @@ function confirmDeleteExpense(id, name) {
         <button class="btn btn-danger"    onclick="deleteExpense(${id})">삭제</button>
       </div>
     </div>`);
+}
+
+async function openExpenseCategoriesModal() {
+  const res = await get('/api/expense-categories');
+  state.config.expense_categories = res.categories;
+  renderExpenseCategoriesModal();
+}
+
+function renderExpenseCategoriesModal() {
+  const cats = state.config.expense_categories || [];
+  const rows = cats.map((c, i) => `
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
+      <span style="flex:1;font-size:14px">${esc(c)}</span>
+      ${i >= 0 ? `<button class="btn btn-sm btn-danger" style="height:26px;padding:0 10px;font-size:11px" onclick="deleteExpenseCategory('${c.replace(/'/g,"\\'")}')">삭제</button>` : ''}
+    </div>`).join('');
+
+  openModal('비용 카테고리 관리', `
+    <div>
+      ${rows || '<div style="color:var(--text-3);padding:16px;text-align:center">카테고리 없음</div>'}
+      <div style="display:flex;gap:8px;margin-top:var(--s4)">
+        <input class="form-input" id="new-cat-input" placeholder="새 카테고리 이름" style="flex:1">
+        <button class="btn btn-primary" onclick="addExpenseCategory()">추가</button>
+      </div>
+    </div>`);
+}
+
+async function addExpenseCategory() {
+  const input = document.getElementById('new-cat-input');
+  const name = (input?.value || '').trim();
+  if (!name) return;
+  const cats = [...(state.config.expense_categories || [])];
+  if (cats.includes(name)) { showToast('이미 존재하는 카테고리입니다', 'error'); return; }
+  cats.push(name);
+  const res = await put('/api/expense-categories', { categories: cats });
+  state.config.expense_categories = res.categories;
+  renderExpenseCategoriesModal();
+}
+
+async function deleteExpenseCategory(name) {
+  const cats = (state.config.expense_categories || []).filter(c => c !== name);
+  const res = await put('/api/expense-categories', { categories: cats });
+  state.config.expense_categories = res.categories;
+  renderExpenseCategoriesModal();
 }
 
 async function deleteExpense(id) {
@@ -877,11 +1195,27 @@ function openModal(title, bodyHTML) {
   document.getElementById('modal-body').innerHTML = bodyHTML;
   document.getElementById('modal-backdrop').classList.add('open');
   document.getElementById('modal-wrap').classList.add('open');
+  _modalDirty = false;
+  // Track form changes
+  setTimeout(() => {
+    const form = document.querySelector('#modal-body form');
+    if (form) form.addEventListener('input', () => { _modalDirty = true; }, { once: false });
+  }, 0);
 }
+
+let _modalDirty = false;
 
 function closeModal() {
   document.getElementById('modal-backdrop').classList.remove('open');
   document.getElementById('modal-wrap').classList.remove('open');
+  _modalDirty = false;
+}
+
+function tryCloseModal() {
+  if (_modalDirty) {
+    if (!confirm('수정된 내용이 있습니다. 저장하지 않고 닫을까요?')) return;
+  }
+  closeModal();
 }
 
 function openDealModal(dealOrNull) {
@@ -1036,6 +1370,7 @@ function openActivityModal(dealId, dealTitle) {
     `<option value="${t}">${t}</option>`
   ).join('');
   const today = new Date().toISOString().split('T')[0];
+  const acctDatalist = state.accounts.map(a => `<option value="${esc(a.name)}">`).join('');
 
   openModal('활동 기록', `
     <form class="form" id="activity-form" onsubmit="saveActivity(event)" data-deal-id="${dealId}">
@@ -1054,6 +1389,10 @@ function openActivityModal(dealId, dealTitle) {
         </div>
       </div>
       <div class="form-group">
+        <label class="form-label">담당자</label>
+        <input class="form-input" name="assignee" placeholder="담당자 이름">
+      </div>
+      <div class="form-group">
         <label class="form-label">내용 <span class="req">*</span></label>
         <textarea class="form-textarea" name="notes" placeholder="통화 내용, 미팅 결과, 다음 단계 등..." required style="min-height:120px"></textarea>
       </div>
@@ -1062,6 +1401,70 @@ function openActivityModal(dealId, dealTitle) {
         <button type="button" class="btn btn-secondary btn-full" onclick="closeModal()">취소</button>
       </div>
     </form>`);
+}
+
+function openNewActivityModal() {
+  const actOpts = state.config.activity_types.map(t =>
+    `<option value="${t}">${t}</option>`
+  ).join('');
+  const today = new Date().toISOString().split('T')[0];
+  const acctOpts = state.accounts.map(a =>
+    `<option value="${a.id}">${esc(a.name)}</option>`
+  ).join('');
+
+  openModal('새 활동 추가', `
+    <form class="form" id="activity-form" onsubmit="saveNewActivity(event)">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">활동 유형</label>
+          <select class="form-select" name="type">${actOpts}</select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">날짜</label>
+          <input class="form-input" name="date" type="date" value="${today}">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">병원 <span class="req">*</span></label>
+          <select class="form-select" name="account_id" required>
+            <option value="">병원 선택...</option>
+            ${acctOpts}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">담당자</label>
+          <input class="form-input" name="assignee" placeholder="담당자 이름">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">내용 <span class="req">*</span></label>
+        <textarea class="form-textarea" name="notes" placeholder="통화 내용, 미팅 결과, 다음 단계 등..." required style="min-height:120px"></textarea>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary btn-full">저장</button>
+        <button type="button" class="btn btn-secondary btn-full" onclick="closeModal()">취소</button>
+      </div>
+    </form>`);
+}
+
+async function saveNewActivity(event) {
+  event.preventDefault();
+  const form = event.target;
+  const fd = new FormData(form);
+  const body = {
+    account_id: parseInt(fd.get('account_id')) || null,
+    deal_id:    null,
+    type:       fd.get('type') || '통화',
+    date:       fd.get('date') || '',
+    notes:      fd.get('notes').trim(),
+    assignee:   fd.get('assignee').trim(),
+  };
+  await post('/api/activities', body);
+  closeModal();
+  showToast('활동이 기록되었습니다');
+  state.data.activities = await get('/api/activities');
+  render();
 }
 
 // ── Orders ────────────────────────────────────────────────────────────────────
@@ -1108,7 +1511,7 @@ function openOrderModal(idOrNull) {
   const productNames = Object.keys(PRODUCT_PRICES);
   const currentProduct = o.product_name || (productNames[0] || '톰더글로우 프로');
   const productOpts = productNames.map(p =>
-    `<option value="${p}" ${currentProduct === p ? 'selected' : ''}>${p}${PRODUCT_PRICES[p] ? ' — ' + PRODUCT_PRICES[p].toLocaleString() + '원' : ''}</option>`
+    `<option value="${p}" ${currentProduct === p ? 'selected' : ''}>${p}</option>`
   ).join('');
 
   const acctDatalistOrder = state.accounts.map(a => `<option value="${esc(a.name)}">`).join('');
@@ -1148,7 +1551,7 @@ function openOrderModal(idOrNull) {
           <input class="form-input" name="order_date" type="date" value="${o.order_date || today}">
         </div>
         <div class="form-group">
-          <label class="form-label">납품 요청일</label>
+          <label class="form-label">납품일</label>
           <input class="form-input" name="delivery_date" type="date" value="${o.delivery_date || ''}">
         </div>
       </div>
@@ -1254,7 +1657,7 @@ function printOrderPDF(id) {
   <div class="meta">
     <span>발주번호: PO-${orderNo}</span>
     <span>발주일: ${o.order_date || ''}</span>
-    ${o.delivery_date ? `<span>납품 요청일: ${o.delivery_date}</span>` : ''}
+    ${o.delivery_date ? `<span>납품일: ${o.delivery_date}</span>` : ''}
   </div>
   <div class="parties">
     <div class="party-box">
@@ -1605,14 +2008,19 @@ async function saveActivity(event) {
   const form = event.target;
   const fd = new FormData(form);
   const body = {
-    deal_id: parseInt(form.dataset.dealId) || null,
-    type:    fd.get('type') || '통화',
-    date:    fd.get('date') || '',
-    notes:   fd.get('notes').trim(),
+    deal_id:  parseInt(form.dataset.dealId) || null,
+    type:     fd.get('type') || '통화',
+    date:     fd.get('date') || '',
+    notes:    fd.get('notes').trim(),
+    assignee: (fd.get('assignee') || '').trim(),
   };
   await post('/api/activities', body);
   closeModal();
   showToast('활동이 기록되었습니다');
+  if (state.page === 'activities') {
+    state.data.activities = await get('/api/activities');
+    render();
+  }
 }
 
 async function deleteDeal(id) {
@@ -1843,13 +2251,14 @@ function renderProductsModal() {
     <tr>
       <td style="font-weight:600">${esc(p.name)}</td>
       <td style="text-align:right">${(p.unit_price||0).toLocaleString()}원</td>
+      <td style="text-align:right;color:#F04452">${(p.cost_price||0).toLocaleString()}원</td>
       <td>${esc(p.notes||'')}</td>
       <td style="white-space:nowrap">
         <button class="btn btn-sm btn-secondary" style="height:26px;padding:0 10px;font-size:11px" onclick="openProductEditModal(${p.id})">수정</button>
         <button class="btn btn-sm btn-danger" style="height:26px;padding:0 10px;font-size:11px" onclick="confirmDeleteProduct(${p.id},'${esc(p.name).replace(/'/g,"\\'")}')">삭제</button>
       </td>
     </tr>`).join('')
-  : `<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--text-3)">등록된 제품이 없습니다</td></tr>`;
+  : `<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-3)">등록된 제품이 없습니다</td></tr>`;
 
   openModal('제품 관리', `
     <div>
@@ -1858,7 +2267,7 @@ function renderProductsModal() {
       </div>
       <div style="overflow-x:auto">
         <table class="order-table">
-          <thead><tr><th>제품명</th><th style="text-align:right">단가</th><th>메모</th><th></th></tr></thead>
+          <thead><tr><th>제품명</th><th style="text-align:right">판매단가</th><th style="text-align:right">매출원가</th><th>메모</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
@@ -1875,9 +2284,15 @@ function openProductEditModal(idOrNull) {
         <label class="form-label">제품명 <span class="req">*</span></label>
         <input class="form-input" name="name" value="${esc(p.name||'')}" required>
       </div>
-      <div class="form-group">
-        <label class="form-label">단가 (원)</label>
-        <input class="form-input" name="unit_price" type="number" value="${p.unit_price||0}" min="0">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">판매단가 (원)</label>
+          <input class="form-input" name="unit_price" type="number" value="${p.unit_price||0}" min="0">
+        </div>
+        <div class="form-group">
+          <label class="form-label">매출원가 (원) <span style="font-size:11px;color:var(--text-3)">(P&amp;L에 적용)</span></label>
+          <input class="form-input" name="cost_price" type="number" value="${p.cost_price||0}" min="0">
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label">메모</label>
@@ -1895,9 +2310,10 @@ async function saveProduct(event) {
   const form = event.target;
   const fd = new FormData(form);
   const body = {
-    name: fd.get('name').trim(),
+    name:       fd.get('name').trim(),
     unit_price: parseInt(fd.get('unit_price')) || 0,
-    notes: fd.get('notes').trim(),
+    cost_price: parseInt(fd.get('cost_price')) || 0,
+    notes:      fd.get('notes').trim(),
   };
   const id = form.dataset.id;
   if (id) await put(`/api/products/${id}`, body);

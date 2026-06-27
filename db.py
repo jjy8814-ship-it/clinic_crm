@@ -16,6 +16,7 @@ STAGES: List[str] = ["제안 완료", "미팅 확정", "계약 대기중", "계�
 TIERS: List[str] = ["개인의원", "네트워크", "대형병원"]
 ACTIVITY_TYPES: List[str] = ["통화", "미팅", "이메일", "문자", "기타"]
 ACTIVE_STAGES = ("제안 완료", "미팅 확정", "계약 대기중")
+DEFAULT_EXPENSE_CATEGORIES: List[str] = ["판관비", "마케팅비", "고정비"]
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -49,11 +50,13 @@ CREATE TABLE IF NOT EXISTS deals (
 );
 
 CREATE TABLE IF NOT EXISTS activities (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    deal_id  INTEGER REFERENCES deals(id) ON DELETE CASCADE,
-    type     TEXT    DEFAULT '통화',
-    date     TEXT    DEFAULT (date('now','localtime')),
-    notes    TEXT    DEFAULT ''
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_id    INTEGER REFERENCES deals(id) ON DELETE CASCADE,
+    account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+    type       TEXT    DEFAULT '통화',
+    date       TEXT    DEFAULT (date('now','localtime')),
+    notes      TEXT    DEFAULT '',
+    assignee   TEXT    DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -73,15 +76,17 @@ CREATE TABLE IF NOT EXISTS expenses (
     name     TEXT    NOT NULL,
     amount   INTEGER DEFAULT 0,
     month    TEXT    DEFAULT '',
+    date     TEXT    DEFAULT '',
     notes    TEXT    DEFAULT '',
     category TEXT    DEFAULT '판관비'
 );
 
 CREATE TABLE IF NOT EXISTS products (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT    NOT NULL UNIQUE,
-    unit_price INTEGER DEFAULT 0,
-    notes      TEXT    DEFAULT ''
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL UNIQUE,
+    unit_price  INTEGER DEFAULT 0,
+    cost_price  INTEGER DEFAULT 0,
+    notes       TEXT    DEFAULT ''
 );
 """
 
@@ -117,9 +122,11 @@ class Deal:
 class Activity:
     id: Optional[int] = None
     deal_id: Optional[int] = None
+    account_id: Optional[int] = None
     type: str = "통화"
     date: str = ""
     notes: str = ""
+    assignee: str = ""
 
 
 @dataclass
@@ -141,6 +148,7 @@ class Expense:
     name: str = ""
     amount: int = 0
     month: str = ""
+    date: str = ""
     notes: str = ""
     category: str = "판관비"
 
@@ -150,6 +158,7 @@ class Product:
     id: Optional[int] = None
     name: str = ""
     unit_price: int = 0
+    cost_price: int = 0
     notes: str = ""
 
 
@@ -159,29 +168,33 @@ class DB:
         self._c.row_factory = sqlite3.Row
         self._c.executescript(_DDL)
         self._c.commit()
-        # Migrate: add columns if upgrading from older schema
-        for col, typedef in [("contact_name", "TEXT DEFAULT ''"), ("email", "TEXT DEFAULT ''")]:
+
+        # Migrations
+        _migrations = [
+            ("accounts",   "contact_name",  "TEXT DEFAULT ''"),
+            ("accounts",   "email",         "TEXT DEFAULT ''"),
+            ("deals",      "source",        "TEXT DEFAULT ''"),
+            ("deals",      "source_detail", "TEXT DEFAULT ''"),
+            ("expenses",   "category",      "TEXT DEFAULT '판관비'"),
+            ("expenses",   "date",          "TEXT DEFAULT ''"),
+            ("products",   "cost_price",    "INTEGER DEFAULT 0"),
+            ("activities", "assignee",      "TEXT DEFAULT ''"),
+            ("activities", "account_id",    "INTEGER"),
+        ]
+        for table, col, typedef in _migrations:
             try:
-                self._c.execute(f"ALTER TABLE accounts ADD COLUMN {col} {typedef}")
+                self._c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typedef}")
                 self._c.commit()
             except sqlite3.OperationalError:
                 pass
-        try:
-            self._c.execute("ALTER TABLE deals ADD COLUMN source TEXT DEFAULT ''")
-            self._c.commit()
-        except sqlite3.OperationalError:
-            pass
-        try:
-            self._c.execute("ALTER TABLE deals ADD COLUMN source_detail TEXT DEFAULT ''")
-            self._c.commit()
-        except sqlite3.OperationalError:
-            pass
-        try:
-            self._c.execute("ALTER TABLE expenses ADD COLUMN category TEXT DEFAULT '판관비'")
-            self._c.commit()
-        except sqlite3.OperationalError:
-            pass
-        # Migrate: remap old stage names to new kanban stages
+
+        # Seed cost_price for existing "톰더글로우 프로" product
+        self._c.execute(
+            "UPDATE products SET cost_price=111419 WHERE name='톰더글로우 프로' AND cost_price=0"
+        )
+        self._c.commit()
+
+        # Remap old stage names
         _stage_map = [
             ("리드",    "제안 완료"),
             ("첫접촉",  "제안 완료"),
@@ -193,7 +206,8 @@ class DB:
         for old, new in _stage_map:
             self._c.execute("UPDATE deals SET stage=? WHERE stage=?", (new, old))
         self._c.commit()
-        # Seed: pre-contracted hospitals
+
+        # Seed pre-contracted hospitals
         for hospital in ["강남아이디의원", "리뉴미피부과 서초점"]:
             row = self._c.execute("SELECT id FROM accounts WHERE name=?", (hospital,)).fetchone()
             if row:
@@ -211,7 +225,8 @@ class DB:
                     (hospital, acct_id),
                 )
         self._c.commit()
-        # Seed: sample orders for pre-contracted hospitals
+
+        # Seed sample orders
         _seed_orders = [
             ("강남아이디의원",      "톰더글로우 프로", 2, 438900, "2026-03-15", "납품완료"),
             ("강남아이디의원",      "톰더글로우 프로", 1, 438900, "2026-05-20", "납품완료"),
@@ -234,28 +249,53 @@ class DB:
                 )
         self._c.commit()
 
-    # ── Stages (user-editable) ────────────────────────────────────────────────
+    # ── Settings helpers ──────────────────────────────────────────────────────
 
-    def get_stages(self) -> List[str]:
-        row = self._c.execute("SELECT value FROM settings WHERE key='stages'").fetchone()
+    def _get_setting(self, key: str, default=None):
+        row = self._c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         if row:
             try:
                 return json.loads(row["value"])
             except Exception:
                 pass
-        return list(STAGES)
+        return default
+
+    def _set_setting(self, key: str, value) -> None:
+        self._c.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (key, json.dumps(value)),
+        )
+        self._c.commit()
+
+    # ── Stages ────────────────────────────────────────────────────────────────
+
+    def get_stages(self) -> List[str]:
+        return self._get_setting('stages', list(STAGES))
 
     def rename_stage(self, old_name: str, new_name: str) -> None:
         stages = self.get_stages()
         if old_name not in stages:
             raise ValueError(f"단계 '{old_name}'를 찾을 수 없습니다.")
         stages[stages.index(old_name)] = new_name
-        self._c.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES ('stages', ?)",
-            (json.dumps(stages),),
-        )
+        self._set_setting('stages', stages)
         self._c.execute("UPDATE deals SET stage=? WHERE stage=?", (new_name, old_name))
         self._c.commit()
+
+    # ── Expense Categories ────────────────────────────────────────────────────
+
+    def get_expense_categories(self) -> List[str]:
+        return self._get_setting('expense_categories', list(DEFAULT_EXPENSE_CATEGORIES))
+
+    def set_expense_categories(self, categories: List[str]) -> None:
+        self._set_setting('expense_categories', categories)
+
+    # ── Dashboard Config ──────────────────────────────────────────────────────
+
+    def get_dashboard_config(self):
+        return self._get_setting('dashboard_config', None)
+
+    def set_dashboard_config(self, config) -> None:
+        self._set_setting('dashboard_config', config)
 
     # ── Accounts ──────────────────────────────────────────────────────────────
 
@@ -348,13 +388,13 @@ class DB:
 
     def create_activity(self, a: Activity) -> int:
         cur = self._c.execute(
-            "INSERT INTO activities (deal_id,type,date,notes) VALUES (?,?,?,?)",
-            (a.deal_id, a.type, a.date or date.today().isoformat(), a.notes),
+            "INSERT INTO activities (deal_id,account_id,type,date,notes,assignee) VALUES (?,?,?,?,?,?)",
+            (a.deal_id, a.account_id, a.type, a.date or date.today().isoformat(), a.notes, a.assignee or ''),
         )
         self._c.commit()
         return cur.lastrowid
 
-    def get_activities(self, deal_id: Optional[int] = None, limit: int = 150) -> List[Activity]:
+    def get_activities(self, deal_id: Optional[int] = None, limit: int = 200) -> List[Activity]:
         if deal_id:
             rows = self._c.execute(
                 "SELECT * FROM activities WHERE deal_id=? ORDER BY date DESC, id DESC LIMIT ?",
@@ -406,20 +446,20 @@ class DB:
     def upsert_expense(self, e: Expense) -> int:
         if e.id:
             self._c.execute(
-                "UPDATE expenses SET name=?,amount=?,month=?,notes=?,category=? WHERE id=?",
-                (e.name, e.amount, e.month, e.notes, e.category, e.id),
+                "UPDATE expenses SET name=?,amount=?,month=?,date=?,notes=?,category=? WHERE id=?",
+                (e.name, e.amount, e.month, e.date, e.notes, e.category, e.id),
             )
             self._c.commit()
             return e.id
         cur = self._c.execute(
-            "INSERT INTO expenses (name,amount,month,notes,category) VALUES (?,?,?,?,?)",
-            (e.name, e.amount, e.month, e.notes, e.category),
+            "INSERT INTO expenses (name,amount,month,date,notes,category) VALUES (?,?,?,?,?,?)",
+            (e.name, e.amount, e.month, e.date, e.notes, e.category),
         )
         self._c.commit()
         return cur.lastrowid
 
     def get_expenses(self) -> List[Expense]:
-        rows = self._c.execute("SELECT * FROM expenses ORDER BY month DESC, id DESC")
+        rows = self._c.execute("SELECT * FROM expenses ORDER BY COALESCE(NULLIF(date,''), month) DESC, id DESC")
         return [Expense(**dict(r)) for r in rows]
 
     def delete_expense(self, eid: int) -> None:
@@ -431,14 +471,14 @@ class DB:
     def upsert_product(self, p: Product) -> int:
         if p.id:
             self._c.execute(
-                "UPDATE products SET name=?,unit_price=?,notes=? WHERE id=?",
-                (p.name, p.unit_price, p.notes, p.id),
+                "UPDATE products SET name=?,unit_price=?,cost_price=?,notes=? WHERE id=?",
+                (p.name, p.unit_price, p.cost_price, p.notes, p.id),
             )
             self._c.commit()
             return p.id
         cur = self._c.execute(
-            "INSERT INTO products (name,unit_price,notes) VALUES (?,?,?)",
-            (p.name, p.unit_price, p.notes),
+            "INSERT INTO products (name,unit_price,cost_price,notes) VALUES (?,?,?,?)",
+            (p.name, p.unit_price, p.cost_price, p.notes),
         )
         self._c.commit()
         return cur.lastrowid

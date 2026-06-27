@@ -7,7 +7,7 @@ import io
 import webbrowser
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import uvicorn
 from fastapi import FastAPI, File, UploadFile
@@ -51,9 +51,11 @@ class DealIn(BaseModel):
 
 class ActivityIn(BaseModel):
     deal_id: Optional[int] = None
+    account_id: Optional[int] = None
     type: str = "통화"
     date: str = ""
     notes: str = ""
+    assignee: str = ""
 
 
 class OrderIn(BaseModel):
@@ -71,6 +73,7 @@ class ExpenseIn(BaseModel):
     name: str
     amount: int = 0
     month: str = ""
+    date: str = ""
     notes: str = ""
     category: str = "판관비"
 
@@ -78,10 +81,16 @@ class ExpenseIn(BaseModel):
 class ProductIn(BaseModel):
     name: str
     unit_price: int = 0
+    cost_price: int = 0
     notes: str = ""
 
 
-COGS_PER_UNIT = 111_419
+class ExpenseCategoriesIn(BaseModel):
+    categories: List[str]
+
+
+class DashboardConfigIn(BaseModel):
+    config: list
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -94,7 +103,14 @@ def index():
 @app.get("/api/config")
 def config():
     products = [dataclasses.asdict(p) for p in _db.get_products()]
-    return {"stages": _db.get_stages(), "tiers": TIERS, "activity_types": ACTIVITY_TYPES, "order_statuses": ORDER_STATUSES, "products": products}
+    return {
+        "stages": _db.get_stages(),
+        "tiers": TIERS,
+        "activity_types": ACTIVITY_TYPES,
+        "order_statuses": ORDER_STATUSES,
+        "products": products,
+        "expense_categories": _db.get_expense_categories(),
+    }
 
 
 class StageRenameIn(BaseModel):
@@ -116,7 +132,12 @@ def dashboard():
     active  = [d for d in all_deals if d.stage in ACTIVE_STAGES]
     closed  = [d for d in all_deals if d.stage == '계약완료']
     orders  = _db.get_orders()
+    expenses = _db.get_expenses()
     summary = _db.get_pipeline_summary()
+
+    # Build product cost map
+    products = _db.get_products()
+    cost_map = {p.name: p.cost_price for p in products}
 
     # 매출 집계
     total_revenue = sum(o.quantity * o.unit_price for o in orders)
@@ -147,15 +168,56 @@ def dashboard():
         for k, v in sorted(monthly.items(), reverse=True)[:6]
     ]
 
+    # 월별 손익 데이터
+    months_pl: dict = {}
+    for o in orders:
+        m = (o.order_date or "")[:7]
+        if not m:
+            continue
+        cogs_unit = cost_map.get(o.product_name, 111419)
+        if m not in months_pl:
+            months_pl[m] = {"revenue": 0, "cogs": 0, "expenses": 0}
+        months_pl[m]["revenue"] += o.quantity * o.unit_price
+        months_pl[m]["cogs"]    += o.quantity * cogs_unit
+    for e in expenses:
+        m = (e.date or e.month or "")[:7]
+        if not m:
+            continue
+        if m not in months_pl:
+            months_pl[m] = {"revenue": 0, "cogs": 0, "expenses": 0}
+        months_pl[m]["expenses"] += e.amount
+
+    total_cogs = sum(d["cogs"] for d in months_pl.values())
+    total_expenses = sum(d["expenses"] for d in months_pl.values())
+    total_gross = total_revenue - total_cogs
+    total_operating = total_gross - total_expenses
+
     return {
         "active_count":      len(active),
         "closed_count":      len(closed),
         "total_revenue":     total_revenue,
         "month_revenue":     month_revenue,
+        "total_cogs":        total_cogs,
+        "total_expenses":    total_expenses,
+        "total_gross":       total_gross,
+        "total_operating":   total_operating,
         "hospital_ranking":  hospital_ranking,
         "monthly_trend":     monthly_trend,
         "summary":           summary,
     }
+
+
+# ── Dashboard Config ───────────────────────────────────────────────────────────
+
+@app.get("/api/dashboard-config")
+def get_dashboard_config():
+    return {"config": _db.get_dashboard_config()}
+
+
+@app.put("/api/dashboard-config")
+def save_dashboard_config(body: DashboardConfigIn):
+    _db.set_dashboard_config(body.config)
+    return {"ok": True}
 
 
 # ── Accounts ───────────────────────────────────────────────────────────────────
@@ -166,7 +228,19 @@ def list_accounts():
     result = []
     for a in _db.get_accounts():
         row = dataclasses.asdict(a)
-        row["deal_count"] = sum(1 for d in all_deals if d.account_id == a.id)
+        acct_deals = [d for d in all_deals if d.account_id == a.id]
+        row["deal_count"] = len(acct_deals)
+        # Determine lead status: prefer active over closed
+        active_deal = next((d for d in acct_deals if d.stage in ACTIVE_STAGES), None)
+        closed_deal = next((d for d in acct_deals if d.stage == '계약완료'), None)
+        if active_deal:
+            row["lead_stage"] = active_deal.stage
+        elif closed_deal:
+            row["lead_stage"] = "계약완료"
+        elif acct_deals:
+            row["lead_stage"] = acct_deals[0].stage
+        else:
+            row["lead_stage"] = None
         result.append(row)
     return result
 
@@ -216,7 +290,6 @@ def list_deals(include_closed: bool = False, include_lost: bool = False):
     return result
 
 
-# NOTE: /closed must be defined BEFORE /{did} so FastAPI doesn't treat "closed" as an int param
 @app.get("/api/deals/closed")
 def list_closed_deals():
     result = []
@@ -256,11 +329,18 @@ def delete_deal(did: int):
 def list_activities(deal_id: Optional[int] = None):
     result = []
     for a in _db.get_activities(deal_id=deal_id):
-        deal = _db.get_deal(a.deal_id) if a.deal_id else None
-        acct = _db.get_account(deal.account_id) if deal and deal.account_id else None
+        # Resolve account: direct account_id takes priority, then via deal
+        acct = None
+        deal = None
+        if a.deal_id:
+            deal = _db.get_deal(a.deal_id)
+        if a.account_id:
+            acct = _db.get_account(a.account_id)
+        elif deal and deal.account_id:
+            acct = _db.get_account(deal.account_id)
         row = dataclasses.asdict(a)
-        row["deal_title"] = deal.title if deal else None
-        row["account_name"] = acct.name if acct else None
+        row["deal_title"]   = deal.title if deal else None
+        row["account_name"] = acct.name  if acct else None
         result.append(row)
     return result
 
@@ -272,9 +352,6 @@ def create_activity(body: ActivityIn):
         a.date = date.today().isoformat()
     a.id = _db.create_activity(a)
     return dataclasses.asdict(a)
-
-
-
 
 
 # ── Orders ─────────────────────────────────────────────────────────────────────
@@ -331,6 +408,9 @@ def list_expenses():
 @app.post("/api/expenses", status_code=201)
 def create_expense(body: ExpenseIn):
     e = Expense(**body.model_dump())
+    # Derive month from date if not provided
+    if e.date and not e.month:
+        e.month = e.date[:7]
     e.id = _db.upsert_expense(e)
     return dataclasses.asdict(e)
 
@@ -338,6 +418,8 @@ def create_expense(body: ExpenseIn):
 @app.put("/api/expenses/{eid}")
 def update_expense(eid: int, body: ExpenseIn):
     e = Expense(id=eid, **body.model_dump())
+    if e.date and not e.month:
+        e.month = e.date[:7]
     _db.upsert_expense(e)
     return dataclasses.asdict(e)
 
@@ -348,27 +430,41 @@ def delete_expense(eid: int):
     return {"ok": True}
 
 
+# ── Expense Categories ─────────────────────────────────────────────────────────
+
+@app.get("/api/expense-categories")
+def get_expense_categories():
+    return {"categories": _db.get_expense_categories()}
+
+
+@app.put("/api/expense-categories")
+def update_expense_categories(body: ExpenseCategoriesIn):
+    _db.set_expense_categories(body.categories)
+    return {"categories": _db.get_expense_categories()}
+
+
 @app.get("/api/pl")
 def get_pl():
     orders = _db.get_orders()
     expenses = _db.get_expenses()
+    products = _db.get_products()
+    cost_map = {p.name: p.cost_price for p in products}
 
-    # Group by month (YYYY-MM)
     months: dict = {}
     for o in orders:
         m = (o.order_date or "")[:7]
         if not m:
             continue
+        cogs_unit = cost_map.get(o.product_name, 111419)
         if m not in months:
             months[m] = {"revenue": 0, "units": 0, "cogs": 0, "expenses": 0}
         months[m]["revenue"] += o.quantity * o.unit_price
         months[m]["units"]   += o.quantity
-        months[m]["cogs"]    += o.quantity * COGS_PER_UNIT
+        months[m]["cogs"]    += o.quantity * cogs_unit
 
-    # expenses_by_month stores list of expenses per month for detail view
     expenses_by_month: dict = {}
     for e in expenses:
-        m = (e.month or "")[:7]
+        m = (e.date or e.month or "")[:7]
         if not m:
             continue
         if m not in months:
@@ -381,9 +477,8 @@ def get_pl():
     rows = []
     for m in sorted(months.keys(), reverse=True):
         d = months[m]
-        gross  = d["revenue"] - d["cogs"]
+        gross     = d["revenue"] - d["cogs"]
         operating = gross - d["expenses"]
-        # category breakdown
         cat_totals: dict = {}
         for exp in expenses_by_month.get(m, []):
             cat = exp.get("category", "판관비") or "판관비"
@@ -393,19 +488,18 @@ def get_pl():
             "revenue":    d["revenue"],
             "units":      d["units"],
             "cogs":       d["cogs"],
-            "expenses":   d["expenses"],
             "gross":      gross,
+            "expenses":   d["expenses"],
             "operating":  operating,
             "cat_totals": cat_totals,
         })
 
     total_revenue   = sum(r["revenue"]   for r in rows)
     total_cogs      = sum(r["cogs"]      for r in rows)
-    total_expenses  = sum(r["expenses"]  for r in rows)
     total_gross     = total_revenue - total_cogs
+    total_expenses  = sum(r["expenses"]  for r in rows)
     total_operating = total_gross - total_expenses
 
-    # build orders_by_month for detail
     orders_by_month: dict = {}
     for o in orders:
         m = (o.order_date or "")[:7]
@@ -419,16 +513,18 @@ def get_pl():
         row["total_price"] = o.quantity * o.unit_price
         orders_by_month[m].append(row)
 
+    expense_categories = _db.get_expense_categories()
+
     return {
         "rows": rows,
         "total": {
             "revenue":   total_revenue,
             "cogs":      total_cogs,
-            "expenses":  total_expenses,
             "gross":     total_gross,
+            "expenses":  total_expenses,
             "operating": total_operating,
         },
-        "cogs_per_unit": COGS_PER_UNIT,
+        "expense_categories": expense_categories,
         "expenses_detail": expenses_by_month,
         "orders_detail":   orders_by_month,
     }
@@ -510,7 +606,6 @@ async def import_deals(file: UploadFile = File(...)):
                 errors.append(f"{i}행: '이메일' 값 없음")
                 continue
 
-            # Phone-based duplicate check
             if phone in phone_to_account:
                 existing_acct = phone_to_account[phone]
                 if existing_acct.name != hospital:
@@ -537,13 +632,8 @@ async def import_deals(file: UploadFile = File(...)):
                 account_id = acct.id
             else:
                 new_acct = Account(
-                    name=hospital,
-                    tier=tier,
-                    contact_name=contact_name,
-                    email=email,
-                    phone=phone,
-                    address=address,
-                    notes=acct_notes,
+                    name=hospital, tier=tier, contact_name=contact_name,
+                    email=email, phone=phone, address=address, notes=acct_notes,
                 )
                 new_id = _db.upsert_account(new_acct)
                 new_acct.id = new_id
@@ -558,10 +648,7 @@ async def import_deals(file: UploadFile = File(...)):
             value = int(raw_val) if raw_val.isdigit() else 0
 
             d = Deal(
-                title=title,
-                account_id=account_id,
-                stage=stage,
-                value=value,
+                title=title, account_id=account_id, stage=stage, value=value,
                 next_action=(r.get("다음 액션") or "").strip(),
                 next_action_date=(r.get("날짜(YYYY-MM-DD)") or "").strip(),
                 notes=(r.get("메모") or "").strip(),

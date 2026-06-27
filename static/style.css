@@ -171,9 +171,9 @@ input, select, textarea { font-family: inherit; }
 }
 
 #app {
-  max-width: 1200px;
+  max-width: 1800px;
   margin: 0 auto;
-  padding: var(--s8) var(--s4);
+  padding: var(--s8) var(--s6);
   width: 100%;
 }
 
