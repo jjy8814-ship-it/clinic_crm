@@ -47,10 +47,13 @@
   </div>
 
   <!-- Modal -->
-  <div class="modal-backdrop" id="modal-backdrop" onclick="tryCloseModal()"></div>
-  <div class="modal-wrap" id="modal-wrap">
-    <div class="modal" id="modal">
+  <div class="modal-backdrop" id="modal-backdrop"></div>
+  <div class="modal-wrap" id="modal-wrap" onclick="handleModalWrapClick(event)">
+    <div class="modal" id="modal" onclick="event.stopPropagation()">
       <div class="modal-header">
+        <button class="modal-expand" id="modal-expand-btn" style="display:none" title="사이드뷰로 열기">
+          <svg viewBox="0 0 20 20" fill="none"><path d="M4 16L16 4M16 4H8M16 4v8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
         <h2 class="modal-title" id="modal-title"></h2>
         <button class="modal-close" onclick="closeModal()">
           <svg viewBox="0 0 20 20" fill="none"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -71,6 +74,7 @@
 
   <!-- Side Panel -->
   <div id="side-panel">
+    <div id="side-panel-resize" onmousedown="startSidePanelResize(event)"></div>
     <div class="side-panel-header">
       <span class="side-panel-title" id="side-panel-title">상세 정보</span>
       <button class="modal-close" onclick="closeSidePanel()">

@@ -1190,9 +1190,19 @@ function tplOrders(orders) {
 
 // ── Modals ─────────────────────────────────────────────────────────────────────
 
-function openModal(title, bodyHTML) {
+function openModal(title, bodyHTML, expandFn) {
   document.getElementById('modal-title').textContent = title;
   document.getElementById('modal-body').innerHTML = bodyHTML;
+  const expandBtn = document.getElementById('modal-expand-btn');
+  if (expandBtn) {
+    if (expandFn) {
+      expandBtn.style.display = '';
+      expandBtn.onclick = expandFn;
+    } else {
+      expandBtn.style.display = 'none';
+      expandBtn.onclick = null;
+    }
+  }
   document.getElementById('modal-backdrop').classList.add('open');
   document.getElementById('modal-wrap').classList.add('open');
   _modalDirty = false;
@@ -1218,6 +1228,10 @@ function tryCloseModal() {
   closeModal();
 }
 
+function handleModalWrapClick(e) {
+  if (e.target === e.currentTarget) tryCloseModal();
+}
+
 function openDealModal(dealOrNull) {
   const d = dealOrNull || {};
   const acct = d.account_id ? state.accounts.find(a => a.id === d.account_id) : null;
@@ -1233,6 +1247,7 @@ function openDealModal(dealOrNull) {
   const detailSources = ['부스/행사', '소개/레퍼럴', '기타'];
   const showDetail = detailSources.includes(d.source || '');
 
+  const _dealExpandFn = d.id ? () => { closeModal(); openSidePanel(d.id); } : null;
   openModal(d.id ? '리드 편집' : '새 리드 추가', `
     <form class="form" id="deal-form" onsubmit="saveDeal(event)" data-id="${d.id || ''}">
       <div class="form-row">
@@ -1250,7 +1265,7 @@ function openDealModal(dealOrNull) {
         <div class="form-group">
           <label class="form-label">연락처</label>
           <input class="form-input" name="phone" id="deal-phone-input" value="${esc(phone)}" placeholder="010-1234-5678"
-            oninput="checkPhoneDuplicate(this, ${d.id || 'null'})">
+            oninput="formatPhone(this);checkPhoneDuplicate(this, ${d.id || 'null'})">
           <div id="phone-dup-msg" style="display:none;font-size:12px;color:var(--red-500);margin-top:4px"></div>
         </div>
         <div class="form-group">
@@ -1299,10 +1314,9 @@ function openDealModal(dealOrNull) {
       </div>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary btn-full">저장</button>
-        ${d.id ? `<button type="button" class="btn btn-secondary btn-full" onclick="closeModal();openSidePanel(${d.id})">↗ 사이드뷰로 보기</button>` : ''}
         <button type="button" class="btn btn-secondary btn-full" onclick="closeModal()">취소</button>
       </div>
-    </form>`);
+    </form>`, _dealExpandFn);
 }
 
 function onSourceChange(sel) {
@@ -1326,6 +1340,7 @@ function openAccountModal(idOrNull) {
     `<option value="${t}" ${(a.tier || '개인의원') === t ? 'selected' : ''}>${t}</option>`
   ).join('');
 
+  const _acctExpandFn = a.id ? () => { closeModal(); openAccountSidePanel(a.id); } : null;
   openModal(a.id ? '거래처 편집' : '새 거래처 추가', `
     <form class="form" id="account-form" onsubmit="saveAccount(event)" data-id="${a.id || ''}">
       <div class="form-group">
@@ -1343,7 +1358,7 @@ function openAccountModal(idOrNull) {
         </div>
         <div class="form-group">
           <label class="form-label">전화번호</label>
-          <input class="form-input" name="phone" value="${esc(a.phone||'')}" placeholder="02-1234-5678">
+          <input class="form-input" name="phone" value="${esc(a.phone||'')}" placeholder="02-1234-5678" oninput="formatPhone(this)">
         </div>
       </div>
       <div class="form-group">
@@ -1362,7 +1377,7 @@ function openAccountModal(idOrNull) {
         <button type="submit" class="btn btn-primary btn-full">저장</button>
         <button type="button" class="btn btn-secondary btn-full" onclick="closeModal()">취소</button>
       </div>
-    </form>`);
+    </form>`, _acctExpandFn);
 }
 
 function openActivityModal(dealId, dealTitle) {
@@ -2234,6 +2249,44 @@ function closeSidePanel() {
   const backdrop = document.getElementById('side-panel-backdrop');
   if (panel) panel.classList.remove('open');
   if (backdrop) backdrop.classList.remove('open');
+}
+
+function startSidePanelResize(e) {
+  e.preventDefault();
+  const panel = document.getElementById('side-panel');
+  const handle = document.getElementById('side-panel-resize');
+  if (!panel) return;
+  handle.classList.add('dragging');
+  const startX = e.clientX;
+  const startW = panel.offsetWidth;
+  function onMove(e) {
+    const newW = Math.min(Math.max(startW + (startX - e.clientX), 320), window.innerWidth * 0.8);
+    panel.style.width = newW + 'px';
+    panel.style.transition = 'none';
+  }
+  function onUp() {
+    handle.classList.remove('dragging');
+    panel.style.transition = '';
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+function formatPhone(input) {
+  const digits = input.value.replace(/[^0-9]/g, '').slice(0, 11);
+  let v = digits;
+  if (digits.startsWith('02')) {
+    if (digits.length <= 5)       v = digits;
+    else if (digits.length <= 9)  v = digits.replace(/^(\d{2})(\d{1,3})(\d{1,4})$/, '$1-$2-$3');
+    else                          v = digits.replace(/^(\d{2})(\d{4})(\d{1,4})$/, '$1-$2-$3');
+  } else {
+    if (digits.length <= 6)       v = digits;
+    else if (digits.length <= 10) v = digits.replace(/^(\d{3})(\d{1,3})(\d{1,4})$/, '$1-$2-$3');
+    else                          v = digits.replace(/^(\d{3})(\d{4})(\d{1,4})$/, '$1-$2-$3');
+  }
+  input.value = v;
 }
 
 // ── Products Modal ─────────────────────────────────────────────────────────────
