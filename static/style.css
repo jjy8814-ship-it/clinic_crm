@@ -907,7 +907,9 @@ input, select, textarea { font-family: inherit; }
   width: 100%;
   max-width: 480px;
   max-height: 90vh;
-  overflow-y: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   box-shadow: var(--shadow-lg);
   transform: translateY(20px) scale(0.97);
   opacity: 0;
@@ -924,10 +926,8 @@ input, select, textarea { font-family: inherit; }
   gap: var(--s2);
   padding: var(--s6);
   border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 0;
+  flex-shrink: 0;
   background: var(--bg-card);
-  z-index: 1;
 }
 
 .modal-title {
@@ -966,6 +966,8 @@ input, select, textarea { font-family: inherit; }
 
 .modal-body {
   padding: var(--s6);
+  overflow-y: auto;
+  flex: 1;
 }
 
 /* ── Empty state ─────────────────────────────────────────────────────────────── */
