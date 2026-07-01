@@ -88,6 +88,22 @@ CREATE TABLE IF NOT EXISTS products (
     cost_price  INTEGER DEFAULT 0,
     notes       TEXT    DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS inventory_items (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL,
+    total_qty  INTEGER DEFAULT 0,
+    unit_cost  INTEGER DEFAULT 0,
+    notes      TEXT    DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS deal_inventory (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    deal_id  INTEGER REFERENCES deals(id) ON DELETE CASCADE,
+    item_id  INTEGER REFERENCES inventory_items(id) ON DELETE CASCADE,
+    qty      INTEGER DEFAULT 1,
+    notes    TEXT    DEFAULT ''
+);
 """
 
 
@@ -159,6 +175,24 @@ class Product:
     name: str = ""
     unit_price: int = 0
     cost_price: int = 0
+    notes: str = ""
+
+
+@dataclass
+class InventoryItem:
+    id: Optional[int] = None
+    name: str = ""
+    total_qty: int = 0
+    unit_cost: int = 0
+    notes: str = ""
+
+
+@dataclass
+class DealInventory:
+    id: Optional[int] = None
+    deal_id: Optional[int] = None
+    item_id: Optional[int] = None
+    qty: int = 1
     notes: str = ""
 
 
@@ -494,6 +528,70 @@ class DB:
     def delete_product(self, pid: int) -> None:
         self._c.execute("DELETE FROM products WHERE id=?", (pid,))
         self._c.commit()
+
+    # ── Inventory ─────────────────────────────────────────────────────────────
+
+    def get_inventory_items(self) -> List[InventoryItem]:
+        rows = self._c.execute("SELECT * FROM inventory_items ORDER BY name")
+        return [InventoryItem(**dict(r)) for r in rows]
+
+    def get_inventory_item(self, iid: int) -> Optional[InventoryItem]:
+        r = self._c.execute("SELECT * FROM inventory_items WHERE id=?", (iid,)).fetchone()
+        return InventoryItem(**dict(r)) if r else None
+
+    def upsert_inventory_item(self, item: InventoryItem) -> int:
+        if item.id:
+            self._c.execute(
+                "UPDATE inventory_items SET name=?,total_qty=?,unit_cost=?,notes=? WHERE id=?",
+                (item.name, item.total_qty, item.unit_cost, item.notes, item.id),
+            )
+            self._c.commit()
+            return item.id
+        cur = self._c.execute(
+            "INSERT INTO inventory_items (name,total_qty,unit_cost,notes) VALUES (?,?,?,?)",
+            (item.name, item.total_qty, item.unit_cost, item.notes),
+        )
+        self._c.commit()
+        return cur.lastrowid
+
+    def delete_inventory_item(self, iid: int) -> None:
+        self._c.execute("DELETE FROM inventory_items WHERE id=?", (iid,))
+        self._c.commit()
+
+    def get_deal_inventory(self, deal_id: int) -> List[DealInventory]:
+        rows = self._c.execute(
+            "SELECT * FROM deal_inventory WHERE deal_id=? ORDER BY id", (deal_id,)
+        )
+        return [DealInventory(**dict(r)) for r in rows]
+
+    def get_all_deal_inventory(self) -> List[dict]:
+        rows = self._c.execute("""
+            SELECT di.*, ii.name AS item_name, d.title AS deal_title,
+                   a.name AS account_name
+            FROM deal_inventory di
+            JOIN inventory_items ii ON ii.id = di.item_id
+            JOIN deals d ON d.id = di.deal_id
+            LEFT JOIN accounts a ON a.id = d.account_id
+            ORDER BY di.id
+        """)
+        return [dict(r) for r in rows]
+
+    def set_deal_inventory(self, deal_id: int, items: List[dict]) -> None:
+        self._c.execute("DELETE FROM deal_inventory WHERE deal_id=?", (deal_id,))
+        for it in items:
+            qty = int(it.get("qty", 1))
+            if qty > 0:
+                self._c.execute(
+                    "INSERT INTO deal_inventory (deal_id,item_id,qty,notes) VALUES (?,?,?,?)",
+                    (deal_id, it["item_id"], qty, it.get("notes", "")),
+                )
+        self._c.commit()
+
+    def get_inventory_checkout_summary(self) -> dict:
+        rows = self._c.execute(
+            "SELECT item_id, SUM(qty) AS out_qty FROM deal_inventory GROUP BY item_id"
+        )
+        return {r["item_id"]: r["out_qty"] for r in rows}
 
     def close(self) -> None:
         self._c.close()

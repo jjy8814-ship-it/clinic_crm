@@ -58,6 +58,10 @@ async function navigate(page) {
       [state.data.pl, state.data.expenses] = await Promise.all([
         get('/api/pl'), get('/api/expenses'),
       ]);
+    } else if (page === 'inventory') {
+      [state.data.inventory, state.data.checkouts] = await Promise.all([
+        get('/api/inventory'), get('/api/inventory/checkouts'),
+      ]);
     }
     render();
   } catch (e) {
@@ -89,6 +93,7 @@ function render() {
     case 'orders':      app.innerHTML = tplOrders(state.data.orders); break;
     case 'activities':  app.innerHTML = tplActivities(state.data.activities); break;
     case 'pl':          app.innerHTML = tplPL(state.data.pl, state.data.expenses); break;
+    case 'inventory':   app.innerHTML = tplInventory(state.data.inventory, state.data.checkouts); break;
   }
 }
 
@@ -988,7 +993,10 @@ function openExpenseModal(idOrNull) {
         </div>
         <div class="form-group">
           <label class="form-label">금액 (원) <span class="req">*</span></label>
-          <input class="form-input" name="amount" type="number" value="${e.amount || ''}" placeholder="0" min="0" required>
+          <input class="form-input currency-input" id="expense-amount-input" name="amount_display"
+            value="${e.amount ? Number(e.amount).toLocaleString() : ''}"
+            data-raw-value="${e.amount || ''}"
+            placeholder="0" oninput="formatCurrency(this)" required>
         </div>
       </div>
       <div class="form-group">
@@ -1009,7 +1017,7 @@ async function saveExpense(event) {
   const dateVal = fd.get('date') || '';
   const body = {
     name:     fd.get('name').trim(),
-    amount:   parseInt(fd.get('amount')) || 0,
+    amount:   parseCurrencyInput(document.getElementById('expense-amount-input')),
     date:     dateVal,
     month:    dateVal ? dateVal.slice(0, 7) : '',
     notes:    fd.get('notes').trim(),
@@ -1280,7 +1288,16 @@ function openDealModal(dealOrNull) {
         </div>
         <div class="form-group">
           <label class="form-label">금액 (원)</label>
-          <input class="form-input" name="value" type="number" value="${d.value || ''}" placeholder="0" min="0">
+          <input class="form-input currency-input" id="deal-value-input" name="value_display"
+            value="${d.value ? Number(d.value).toLocaleString() : ''}"
+            data-raw-value="${d.value || ''}"
+            placeholder="0" oninput="formatCurrency(this)">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">반출 재고</label>
+        <div id="deal-inventory-section">
+          <div style="color:var(--text-3);font-size:13px;padding:8px 0">불러오는 중...</div>
         </div>
       </div>
       <div class="form-group">
@@ -1317,6 +1334,40 @@ function openDealModal(dealOrNull) {
         <button type="button" class="btn btn-secondary btn-full" onclick="closeModal()">취소</button>
       </div>
     </form>`, _dealExpandFn);
+
+  // Load inventory section asynchronously after modal renders
+  setTimeout(() => loadDealInventorySection(d.id || null), 50);
+}
+
+async function loadDealInventorySection(dealId) {
+  const sec = document.getElementById('deal-inventory-section');
+  if (!sec) return;
+  try {
+    const [items, checked] = await Promise.all([
+      get('/api/inventory'),
+      dealId ? get(`/api/deals/${dealId}/inventory`) : Promise.resolve([]),
+    ]);
+    if (!items.length) {
+      sec.innerHTML = `<div style="font-size:13px;color:var(--text-3)">등록된 재고 항목이 없습니다. <button class="btn-ghost" style="font-size:13px" onclick="closeModal();navigate('inventory')">재고 관리</button>에서 추가하세요.</div>`;
+      return;
+    }
+    const checkedMap = {};
+    checked.forEach(c => { checkedMap[c.item_id] = c.qty; });
+    const rows = items.map(it => `
+      <div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--gray-100)">
+        <span style="flex:1;font-size:13px">${esc(it.name)}</span>
+        <span style="font-size:12px;color:var(--text-3);white-space:nowrap">재고 ${it.remaining}/${it.total_qty}</span>
+        <input type="number" class="form-input inv-qty-input" min="0"
+          style="width:70px;height:30px;font-size:13px;padding:0 8px;text-align:center"
+          data-item-id="${it.id}"
+          value="${checkedMap[it.id] || 0}"
+          placeholder="0">
+      </div>`).join('');
+    sec.innerHTML = `<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;padding:0 12px">${rows}</div>
+      <div style="font-size:12px;color:var(--text-3);margin-top:4px">수량 입력 시 해당 리드에 반출 처리됩니다 (0이면 제외)</div>`;
+  } catch(e) {
+    sec.innerHTML = `<div style="font-size:13px;color:var(--red-500)">재고 로드 실패</div>`;
+  }
 }
 
 function onSourceChange(sel) {
@@ -1502,7 +1553,7 @@ function getProductPriceMap() {
 
 function calcOrderTotal() {
   const qty   = parseInt(document.getElementById('order-quantity')?.value) || 0;
-  const price = parseInt(document.getElementById('order-unit-price')?.value) || 0;
+  const price = parseCurrencyInput(document.getElementById('order-unit-price'));
   const el    = document.getElementById('order-total');
   if (el) el.textContent = (qty * price).toLocaleString() + '원';
 }
@@ -1511,7 +1562,7 @@ function onProductChange(sel) {
   const map = getProductPriceMap();
   const price = map[sel.value];
   const priceInput = document.getElementById('order-unit-price');
-  if (priceInput && price != null) { priceInput.value = price || ''; calcOrderTotal(); }
+  if (priceInput && price != null) { setCurrencyInput(priceInput, price || 0); calcOrderTotal(); }
 }
 
 function openOrderModal(idOrNull) {
@@ -1554,7 +1605,10 @@ function openOrderModal(idOrNull) {
       </div>
       <div class="form-group">
         <label class="form-label">공급가 (원, VAT포함)</label>
-        <input class="form-input" id="order-unit-price" name="unit_price" type="number" value="${o.unit_price || PRODUCT_PRICES[currentProduct] || ''}" placeholder="0" min="0" oninput="calcOrderTotal()">
+        <input class="form-input currency-input" id="order-unit-price" name="unit_price_display"
+          value="${(o.unit_price || PRODUCT_PRICES[currentProduct] || 0) ? Number(o.unit_price || PRODUCT_PRICES[currentProduct] || 0).toLocaleString() : ''}"
+          data-raw-value="${o.unit_price || PRODUCT_PRICES[currentProduct] || ''}"
+          placeholder="0" oninput="formatCurrency(this);calcOrderTotal()">
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;background:#F4F5F7;border-radius:8px;padding:12px 16px">
         <span style="font-size:13px;font-weight:600;color:#4E5968">총 매출</span>
@@ -1596,7 +1650,7 @@ async function saveOrder(event) {
     account_id:    matchedAcct ? matchedAcct.id : null,
     product_name:  fd.get('product_name').trim() || '톰더글로우',
     quantity:      parseInt(fd.get('quantity')) || 1,
-    unit_price:    parseInt(fd.get('unit_price')) || 0,
+    unit_price:    parseCurrencyInput(document.getElementById('order-unit-price')),
     order_date:    fd.get('order_date') || '',
     delivery_date: fd.get('delivery_date') || '',
     status:        fd.get('status') || '발주완료',
@@ -1977,11 +2031,12 @@ async function saveDeal(event) {
     state.accounts = await get('/api/accounts');
   }
 
+  const valueInput = document.getElementById('deal-value-input');
   const body = {
     title:            hospitalName,
     account_id,
     stage:            fd.get('stage') || '제안 완료',
-    value:            parseInt(fd.get('value')) || 0,
+    value:            parseCurrencyInput(valueInput),
     next_action:      (fd.get('next_action')      || '').trim(),
     next_action_date: fd.get('next_action_date')  || '',
     notes:            (fd.get('notes')            || '').trim(),
@@ -1989,7 +2044,19 @@ async function saveDeal(event) {
     source_detail:    (fd.get('source_detail')    || '').trim(),
   };
   const id = form.dataset.id;
-  await (id ? put(`/api/deals/${id}`, body) : post('/api/deals', body));
+  const saved = await (id ? put(`/api/deals/${id}`, body) : post('/api/deals', body));
+
+  // Save inventory checkouts
+  const invInputs = document.querySelectorAll('.inv-qty-input');
+  if (invInputs.length) {
+    const dealId = id || saved.id;
+    const items = [];
+    invInputs.forEach(inp => {
+      const qty = parseInt(inp.value) || 0;
+      if (qty > 0) items.push({ item_id: parseInt(inp.dataset.itemId), qty });
+    });
+    await put(`/api/deals/${dealId}/inventory`, { items });
+  }
   closeModal();
   showToast(newAcctCreated
     ? `리드 추가 완료 (거래처 '${hospitalName}' 자동 등록됨)`
@@ -2274,6 +2341,27 @@ function startSidePanelResize(e) {
   document.addEventListener('mouseup', onUp);
 }
 
+// ── Currency comma formatting ──────────────────────────────────────────────────
+
+function formatCurrency(input) {
+  const raw = input.value.replace(/[^0-9]/g, '');
+  input.value = raw ? Number(raw).toLocaleString() : '';
+  input.dataset.rawValue = raw;
+}
+
+function parseCurrencyInput(el) {
+  if (!el) return 0;
+  const raw = el.dataset.rawValue || el.value.replace(/[^0-9]/g, '');
+  return parseInt(raw) || 0;
+}
+
+function setCurrencyInput(el, val) {
+  if (!el) return;
+  const n = parseInt(val) || 0;
+  el.value = n ? n.toLocaleString() : '';
+  el.dataset.rawValue = n ? String(n) : '';
+}
+
 function formatPhone(input) {
   const digits = input.value.replace(/[^0-9]/g, '').slice(0, 11);
   let v = digits;
@@ -2395,6 +2483,166 @@ async function deleteProduct(id) {
   state.config.products = products;
   state.data.products = products;
   renderProductsModal();
+}
+
+// ── Inventory Page ─────────────────────────────────────────────────────────────
+
+function tplInventory(items, checkouts) {
+  const all = items || [];
+  const allOut = checkouts || [];
+
+  const totalItems = all.length;
+  const totalOut = all.reduce((s, it) => s + (it.out_qty || 0), 0);
+  const totalStock = all.reduce((s, it) => s + (it.total_qty || 0), 0);
+
+  const statusColor = it => {
+    if (it.remaining <= 0) return '#F04452';
+    if (it.remaining <= Math.ceil(it.total_qty * 0.2)) return '#FF6D00';
+    return '#00B140';
+  };
+
+  const rows = all.length ? all.map(it => {
+    const pct = it.total_qty > 0 ? Math.round((it.remaining / it.total_qty) * 100) : 0;
+    const outDeals = allOut.filter(c => c.item_id === it.id);
+    const outHtml = outDeals.length
+      ? outDeals.map(c => `<span style="font-size:11px;background:#EEF4FF;color:#1B64DA;border-radius:4px;padding:1px 7px;margin-right:4px">${esc(c.account_name || c.deal_title)} (${c.qty})</span>`).join('')
+      : '<span style="font-size:12px;color:var(--text-3)">없음</span>';
+    return `
+      <tr>
+        <td style="font-weight:600">${esc(it.name)}</td>
+        <td style="text-align:center;font-weight:700;font-size:16px">${it.total_qty}</td>
+        <td style="text-align:center">
+          <span style="font-weight:700;color:${statusColor(it)};font-size:15px">${it.remaining}</span>
+          <div style="margin-top:4px;height:5px;background:#F2F4F6;border-radius:4px;min-width:60px">
+            <div style="height:100%;background:${statusColor(it)};border-radius:4px;width:${pct}%"></div>
+          </div>
+        </td>
+        <td style="text-align:center;color:#FF6D00;font-weight:600">${it.out_qty || 0}</td>
+        <td style="max-width:300px">${outHtml}</td>
+        <td>${it.unit_cost ? (it.unit_cost).toLocaleString() + '원' : '—'}</td>
+        <td style="color:var(--text-3);font-size:13px">${esc(it.notes || '')}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm btn-secondary" style="height:26px;padding:0 10px;font-size:11px" onclick="openInventoryItemModal(${it.id})">수정</button>
+          <button class="btn btn-sm btn-danger" style="height:26px;padding:0 10px;font-size:11px" onclick="confirmDeleteInventoryItem(${it.id},'${esc(it.name).replace(/'/g,"\\'")}')">삭제</button>
+        </td>
+      </tr>`;
+  }).join('')
+  : `<tr><td colspan="8" style="text-align:center;padding:48px;color:var(--text-3)">
+      <div style="font-size:32px;margin-bottom:12px">📦</div>
+      <div style="font-weight:600;margin-bottom:6px">등록된 재고 항목이 없습니다</div>
+      <div style="font-size:13px">+ 재고 추가 버튼으로 항목을 등록하세요</div>
+    </td></tr>`;
+
+  return `
+    <div class="page-header-row">
+      <h1 class="page-title">재고 관리</h1>
+      <button class="btn btn-primary" onclick="openInventoryItemModal(null)">+ 재고 추가</button>
+    </div>
+    <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:var(--s5)">
+      <div class="stat-card">
+        <div class="stat-label">재고 항목 수</div>
+        <div class="stat-value">${totalItems}종</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">총 보유 수량</div>
+        <div class="stat-value highlight">${totalStock}개</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">반출 중</div>
+        <div class="stat-value" style="color:#FF6D00">${totalOut}개</div>
+      </div>
+    </div>
+    <div class="card" style="overflow-x:auto">
+      <table class="order-table">
+        <thead>
+          <tr>
+            <th>항목명</th>
+            <th style="text-align:center">총 수량</th>
+            <th style="text-align:center">잔여</th>
+            <th style="text-align:center">반출 중</th>
+            <th>반출 리드</th>
+            <th>단가</th>
+            <th>메모</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function openInventoryItemModal(idOrNull) {
+  const items = state.data.inventory || [];
+  const it = typeof idOrNull === 'number' ? items.find(x => x.id === idOrNull) || {} : {};
+  openModal(it.id ? '재고 수정' : '재고 추가', `
+    <form class="form" onsubmit="saveInventoryItem(event)" data-id="${it.id || ''}">
+      <div class="form-group">
+        <label class="form-label">항목명 <span class="req">*</span></label>
+        <input class="form-input" name="name" value="${esc(it.name || '')}" placeholder="데모 기기, 브로셔, 샘플 등" required>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">총 수량</label>
+          <input class="form-input" name="total_qty" type="number" value="${it.total_qty || 0}" min="0">
+        </div>
+        <div class="form-group">
+          <label class="form-label">단가 (원)</label>
+          <input class="form-input currency-input" id="inv-unit-cost" name="unit_cost_display"
+            value="${it.unit_cost ? Number(it.unit_cost).toLocaleString() : ''}"
+            data-raw-value="${it.unit_cost || ''}"
+            placeholder="0" oninput="formatCurrency(this)">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">메모</label>
+        <input class="form-input" name="notes" value="${esc(it.notes || '')}">
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary btn-full">저장</button>
+        <button type="button" class="btn btn-secondary btn-full" onclick="closeModal()">취소</button>
+      </div>
+    </form>`);
+}
+
+async function saveInventoryItem(event) {
+  event.preventDefault();
+  const form = event.target;
+  const fd = new FormData(form);
+  const body = {
+    name:      fd.get('name').trim(),
+    total_qty: parseInt(fd.get('total_qty')) || 0,
+    unit_cost: parseCurrencyInput(document.getElementById('inv-unit-cost')),
+    notes:     fd.get('notes').trim(),
+  };
+  const id = form.dataset.id;
+  await (id ? put(`/api/inventory/${id}`, body) : post('/api/inventory', body));
+  closeModal();
+  showToast(id ? '재고가 수정되었습니다' : '재고가 추가되었습니다');
+  [state.data.inventory, state.data.checkouts] = await Promise.all([
+    get('/api/inventory'), get('/api/inventory/checkouts'),
+  ]);
+  render();
+}
+
+function confirmDeleteInventoryItem(id, name) {
+  openModal('재고 삭제', `
+    <div class="confirm-body">
+      <div class="confirm-icon">🗑</div>
+      <div class="confirm-msg">'${esc(name)}' 항목을 삭제하시겠습니까?</div>
+      <div class="confirm-sub">관련된 반출 기록도 함께 삭제됩니다.</div>
+      <button class="btn btn-danger btn-full" onclick="deleteInventoryItem(${id})">삭제</button>
+      <div style="margin-top:12px"><button class="btn-ghost" onclick="closeModal()">취소</button></div>
+    </div>`);
+}
+
+async function deleteInventoryItem(id) {
+  await del(`/api/inventory/${id}`);
+  closeModal();
+  showToast('삭제되었습니다');
+  [state.data.inventory, state.data.checkouts] = await Promise.all([
+    get('/api/inventory'), get('/api/inventory/checkouts'),
+  ]);
+  render();
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────

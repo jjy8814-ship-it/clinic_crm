@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from db import DB, Account, Activity, Deal, Expense, Order, Product, ACTIVITY_TYPES, ACTIVE_STAGES, STAGES, TIERS
+from db import DB, Account, Activity, Deal, Expense, Order, Product, InventoryItem, ACTIVITY_TYPES, ACTIVE_STAGES, STAGES, TIERS
 
 ORDER_STATUSES = ["발주완료", "납품완료", "취소"]
 
@@ -91,6 +91,17 @@ class ExpenseCategoriesIn(BaseModel):
 
 class DashboardConfigIn(BaseModel):
     config: list
+
+
+class InventoryItemIn(BaseModel):
+    name: str
+    total_qty: int = 0
+    unit_cost: int = 0
+    notes: str = ""
+
+
+class DealInventoryIn(BaseModel):
+    items: List[dict]
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -555,6 +566,57 @@ def update_product(pid: int, body: ProductIn):
 def delete_product(pid: int):
     _db.delete_product(pid)
     return {"ok": True}
+
+
+# ── Inventory ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/inventory")
+def list_inventory():
+    items = _db.get_inventory_items()
+    checkout = _db.get_inventory_checkout_summary()
+    result = []
+    for it in items:
+        row = dataclasses.asdict(it)
+        row["out_qty"] = checkout.get(it.id, 0)
+        row["remaining"] = it.total_qty - row["out_qty"]
+        result.append(row)
+    return result
+
+
+@app.get("/api/inventory/checkouts")
+def list_checkouts():
+    return _db.get_all_deal_inventory()
+
+
+@app.post("/api/inventory", status_code=201)
+def create_inventory_item(body: InventoryItemIn):
+    item = InventoryItem(**body.model_dump())
+    item.id = _db.upsert_inventory_item(item)
+    return dataclasses.asdict(item)
+
+
+@app.put("/api/inventory/{iid}")
+def update_inventory_item(iid: int, body: InventoryItemIn):
+    item = InventoryItem(id=iid, **body.model_dump())
+    _db.upsert_inventory_item(item)
+    return dataclasses.asdict(item)
+
+
+@app.delete("/api/inventory/{iid}")
+def delete_inventory_item(iid: int):
+    _db.delete_inventory_item(iid)
+    return {"ok": True}
+
+
+@app.get("/api/deals/{did}/inventory")
+def get_deal_inventory(did: int):
+    return [dataclasses.asdict(x) for x in _db.get_deal_inventory(did)]
+
+
+@app.put("/api/deals/{did}/inventory")
+def set_deal_inventory(did: int, body: DealInventoryIn):
+    _db.set_deal_inventory(did, body.items)
+    return [dataclasses.asdict(x) for x in _db.get_deal_inventory(did)]
 
 
 # ── CSV Import ─────────────────────────────────────────────────────────────────
